@@ -1200,6 +1200,10 @@ class AniPrepApp:
         # 立即锁定 TMDB 回调
         self._renaming = True
 
+        # 诊断-入口
+        ep_sample = [e.episode for e in self.entries[:6] if e.checked and e.episode]
+        messagebox.showinfo("诊断-入口", f"入口时前6个集号: {ep_sample}")
+
         if not self.entries:
             self._renaming = False
             messagebox.showwarning("提示", "没有可重命名的文件，请先扫描")
@@ -1283,6 +1287,14 @@ class AniPrepApp:
 
         # deep copy：完全脱离 self.entries，后续任何修改都不影响本次重命名
         import copy
+
+        # 修复：冻结前从文件名重新提取集号，消除任何已发生的篡改
+        for e in checked:
+            ep_num = extract_episode_number(e.original_stem)
+            if ep_num is not None:
+                e.episode = str(ep_num)
+            compute_new_names(e)
+
         checked_copy = copy.deepcopy(checked)
 
         # 诊断：弹出冻结时的前6条数据
