@@ -585,69 +585,47 @@ def _scan_single_dir(dir_path: str, season: str, entries: list, root_path: str):
 #  重命名执行线程
 # ============================================================================
 
-def execute_rename(entries: list[FileEntry], folders: list, result_queue: queue.Queue):
-    """在后台线程中批量重命名（先文件，后文件夹）。
-    
-    使用快照数据，防止并发修改导致文件名错乱。
+def execute_rename(tasks: list, folders: list, result_queue: queue.Queue):
+    """在后台线程中批量重命名。
+
+    tasks: [{'ref': FileEntry, 'old_path': str, 'new_path': str,
+             'old_name': str, 'episode': str, 'new_name': str,
+             'subs': [(old, new), ...]}, ...]
+    所有路径数据已冻结，不依赖原始 entry 对象。
     """
-    # 冻结快照
-    snapshots = []
-    for e in entries:
-        if not e.checked:
-            continue
-        subs = [(s.original_path, os.path.join(e.parent_dir, sanitize_filename(s.new_name)),
-                 s.original_name)
-                for s in e.subtitles if s.sync_enabled]
-        snapshots.append({
-            'entry': e,
-            'old_path': e.original_path,
-            'new_path': os.path.join(e.parent_dir, sanitize_filename(e._new_name)),
-            'old_name': e.original_name,
-            'episode': e.episode,    # 记下原始值
-            'new_name': e._new_name, # 记下原始值
-            'subs': subs,
-        })
-
-    # 先发一条调试信息
-    result_queue.put(('progress', f'快照: {len(snapshots)} 文件, ep={snapshots[0]["episode"]}..{snapshots[-1]["episode"]}'))
-
     success = 0
     fail = 0
-    total = len(snapshots)
+    total = len(tasks)
 
-    for i, snap in enumerate(snapshots):
-        entry = snap['entry']
-
+    for i, task in enumerate(tasks):
         # 重命名字幕
-        for sub_old, sub_new, sub_name in snap['subs']:
+        for sub_old, sub_new in task['subs']:
             try:
                 if sub_old != sub_new and os.path.exists(sub_old):
                     os.rename(sub_old, sub_new)
-            except OSError as e:
+            except OSError:
                 pass
 
         # 重命名视频
         try:
-            if snap['old_path'] != snap['new_path'] and os.path.exists(snap['old_path']):
-                os.rename(snap['old_path'], snap['new_path'])
-                entry.original_path = snap['new_path']
-                entry.status = '✓'
-                # 回写确保 episode 和 _new_name 未被篡改
-                if entry.episode != snap['episode'] or entry._new_name != snap['new_name']:
-                    result_queue.put(('progress', f'⚠️ 数据被篡改: {snap["old_name"]} ep={entry.episode}(原{snap["episode"]}) new={entry._new_name}(原{snap["new_name"]})'))
-                    entry.episode = snap['episode']
-                    entry._new_name = snap['new_name']
+            if task['old_path'] != task['new_path'] and os.path.exists(task['old_path']):
+                os.rename(task['old_path'], task['new_path'])
+                task['ref'].original_path = task['new_path']
+                # 用冻结值覆盖可能被篡改的字段
+                task['ref'].episode = task['episode']
+                task['ref']._new_name = task['new_name']
+                task['ref'].status = '✓'
                 success += 1
             else:
-                entry.status = '✓'
+                task['ref'].status = '✓'
                 success += 1
         except OSError as e:
-            entry.status = f'✗ {e}'
+            task['ref'].status = f'✗ {e}'
             fail += 1
 
-        result_queue.put(('progress', f'[{i+1}/{total}] {entry.status} {snap["old_name"]}'))
+        result_queue.put(('progress', f'[{i+1}/{total}] {task["ref"].status} {task["old_name"]}'))
 
-    # 后处理：重命名文件夹（深层优先）
+    # 文件夹重命名
     if folders:
         for f in sorted(folders, key=lambda x: x.original_path.count(os.sep), reverse=True):
             try:
@@ -655,8 +633,8 @@ def execute_rename(entries: list[FileEntry], folders: list, result_queue: queue.
                 if new_path != f.original_path and os.path.exists(f.original_path):
                     os.rename(f.original_path, new_path)
                     f.status = '✓'
-            except OSError as e:
-                f.status = f'✗ {e}'
+            except OSError:
+                pass
 
     result_queue.put(('result', success, fail))
 
@@ -1229,24 +1207,18 @@ class AniPrepApp:
 
     def _execute_rename(self):
         """执行重命名前检查，通过后在后台线程中执行。"""
-        # 立即锁定，防止 messagebox 事件循环中 TMDB 回调篡改数据
+        # 立即锁定 TMDB 回调
         self._renaming = True
-        try:
-            self._do_execute_rename()
-        finally:
-            # 如果 _do_execute_rename 已启动线程，会保持 _renaming=True；
-            # 如果提前返回（用户取消），重置标志
-            if self._renaming and not getattr(self, '_thread_started', False):
-                self._renaming = False
 
-    def _do_execute_rename(self):
         if not self.entries:
+            self._renaming = False
             messagebox.showwarning("提示", "没有可重命名的文件，请先扫描")
             return
 
         # 筛选勾选且集号非空的条目
         checked = [e for e in self.entries if e.checked and e.episode]
         if not checked:
+            self._renaming = False
             messagebox.showwarning("提示", "没有选中任何有效文件（需要集号不为空）")
             return
 
@@ -1259,6 +1231,7 @@ class AniPrepApp:
                 "确认",
                 f"以下 {len(empty_eps)} 个文件的集号为空，将跳过它们：\n{names}{more}\n\n是否继续重命名其他文件？"
             ):
+                self._renaming = False
                 return
 
         # 检查 ⚠️ 警告行
@@ -1272,6 +1245,7 @@ class AniPrepApp:
                 "⚠️ 警告确认",
                 f"以下 {len(warnings)} 个文件存在警告：\n{names}{more}\n\n是否仍要继续？"
             ):
+                self._renaming = False
                 return
 
         # 冲突检测
@@ -1282,6 +1256,7 @@ class AniPrepApp:
                 conflict_msgs.append(f"  • {checked[a]._new_name}\n    ↕ {checked[b]._new_name}")
             names = "\n".join(conflict_msgs[:10])
             messagebox.showerror("命名冲突", f"检测到 {len(conflicts)} 个命名冲突，请修正后重试：\n{names}")
+            self._renaming = False
             return
 
         # 路径长度检查
@@ -1297,6 +1272,7 @@ class AniPrepApp:
                 "路径过长警告",
                 f"以下 {len(long_paths)} 个文件的目标路径超过 {PATH_LENGTH_WARN} 字符：\n{names}{more}\n\n是否继续？"
             ):
+                self._renaming = False
                 return
 
         # 最终确认
@@ -1307,16 +1283,32 @@ class AniPrepApp:
             confirm_msg += f"\n以及 {folder_count} 个文件夹"
         confirm_msg += "\n\n此操作不可撤销，是否继续？"
         if not messagebox.askyesno("确认重命名", confirm_msg):
+            self._renaming = False
             return
 
         # 在后台线程中执行
         self.rename_btn.config(state=tk.DISABLED)
         self.status_text.set("正在重命名...")
         folders_to_rename = [f for f in self.folders if f.checked and f.new_name and f.new_name != f.original_name]
-        self._thread_started = True
+
+        # 冻结任务数据：脱离 entry 对象引用，纯字符串副本
+        tasks = []
+        for e in checked:
+            tasks.append({
+                'ref': e,
+                'old_path': e.original_path,
+                'new_path': os.path.join(e.parent_dir, sanitize_filename(e._new_name)),
+                'old_name': e.original_name,
+                'episode': e.episode,       # 冻结当前值
+                'new_name': e._new_name,    # 冻结当前值
+                'subs': [(s.original_path,
+                          os.path.join(e.parent_dir, sanitize_filename(s.new_name)))
+                         for s in e.subtitles if s.sync_enabled],
+            })
+
         threading.Thread(
             target=execute_rename,
-            args=(checked, folders_to_rename, self.result_queue),
+            args=(tasks, folders_to_rename, self.result_queue),
             daemon=True,
         ).start()
 
@@ -1370,12 +1362,11 @@ class AniPrepApp:
 
                 elif kind == 'result':
                     self.rename_btn.config(state=tk.NORMAL)
-                    self._thread_started = False
+                    self._renaming = False
                     success, fail = msg[1], msg[2]
                     self._refresh_table()
                     self.status_text.set(f"重命名完成：{success} 成功，{fail} 失败")
                     messagebox.showinfo("完成", f"重命名完成！\n成功: {success}\n失败: {fail}")
-                    self._renaming = False  # 对话框关闭后才允许 TMDB 修改数据
 
         except queue.Empty:
             pass
