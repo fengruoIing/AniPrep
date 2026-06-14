@@ -1200,10 +1200,6 @@ class AniPrepApp:
         # 立即锁定 TMDB 回调
         self._renaming = True
 
-        # 诊断-入口
-        ep_sample = [e.episode for e in self.entries[:6] if e.checked and e.episode]
-        messagebox.showinfo("诊断-入口", f"入口时前6个集号: {ep_sample}")
-
         if not self.entries:
             self._renaming = False
             messagebox.showwarning("提示", "没有可重命名的文件，请先扫描")
@@ -1287,21 +1283,7 @@ class AniPrepApp:
 
         # deep copy：完全脱离 self.entries，后续任何修改都不影响本次重命名
         import copy
-
-        # 修复：冻结前从文件名重新提取集号，消除任何已发生的篡改
-        for e in checked:
-            ep_num = extract_episode_number(e.original_stem)
-            if ep_num is not None:
-                e.episode = str(ep_num)
-            compute_new_names(e)
-
         checked_copy = copy.deepcopy(checked)
-
-        # 诊断：弹出冻结时的前6条数据
-        diag_lines = [f"冻结: {len(checked_copy)}个文件"]
-        for e in checked_copy[:6]:
-            diag_lines.append(f"  ep={e.episode}  new={e._new_name[:50]}")
-        messagebox.showinfo("诊断-冻结时数据", "\n".join(diag_lines))
 
         tasks = []
         for i, e in enumerate(checked_copy):
@@ -1375,11 +1357,6 @@ class AniPrepApp:
                     self._refresh_table()
                     self.status_text.set(f"重命名完成：{success} 成功，{fail} 失败")
                     messagebox.showinfo("完成", f"重命名完成！\n成功: {success}\n失败: {fail}")
-                    # 诊断：完成后数据
-                    diag2 = ["完成后数据:"]
-                    for e in self.entries[:6]:
-                        diag2.append(f"  ep={e.episode}  new={e._new_name[:50]}")
-                    messagebox.showinfo("诊断-完成后数据", "\n".join(diag2))
                     self._renaming = False
 
         except queue.Empty:
@@ -1961,9 +1938,13 @@ class AniPrepApp:
             dlg.after(200, do_search)
 
     def _apply_season_offset(self):
-        """检测跨季全局序号并自动偏移为季内从1开始。"""
+        """检测跨季全局序号并自动偏移为季内从1开始。
+        
+        仅当某季最小集号明显大于累积偏移时才执行偏移，
+        防止已按季编号的文件被错误重编号。
+        """
         if getattr(self, '_renaming', False):
-            return  # 重命名中不动数据
+            return
 
         season_set = set(e.season for e in self.entries)
         if len(season_set) <= 1:
@@ -1979,23 +1960,39 @@ class AniPrepApp:
             if self.tmdb_episodes and s in self.tmdb_episodes:
                 cumulative += len(self.tmdb_episodes[s])
             else:
-                # 无 TMDB：用本季文件数作为"该季应有集数"的估算
                 count_in_season = sum(1 for e in self.entries if e.season == s)
                 cumulative += count_in_season
 
+        # 检测：如果某季的首集号 <= 累积偏移+1，说明已经是季内编号，不偏移
         changed = False
-        for e in self.entries:
-            if e.season in offsets and e.episode:
+        for s in sorted_seasons:
+            offset = offsets[s]
+            if offset == 0:
+                continue  # 第一季无需偏移
+            season_files = [e for e in self.entries if e.season == s and e.episode]
+            if not season_files:
+                continue
+            try:
+                min_ep = min(int(e.episode) for e in season_files)
+            except ValueError:
+                continue
+            # 如果该季最小集号已经 <= offset（即接近1），说明是季内编号，跳过
+            if min_ep <= offset:
+                continue
+
+            # 全局编号：需要偏移
+            for e in season_files:
                 try:
                     ep_num = int(e.episode)
-                    offset = offsets[e.season]
-                    if offset > 0 and ep_num > offset:
+                    if ep_num > offset:
                         e.episode = str(ep_num - offset)
                         changed = True
                 except ValueError:
                     pass
 
         if changed:
+            for e in self.entries:
+                compute_new_names(e)
             for e in self.entries:
                 compute_new_names(e)
 
