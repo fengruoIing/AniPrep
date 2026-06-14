@@ -1229,6 +1229,17 @@ class AniPrepApp:
 
     def _execute_rename(self):
         """执行重命名前检查，通过后在后台线程中执行。"""
+        # 立即锁定，防止 messagebox 事件循环中 TMDB 回调篡改数据
+        self._renaming = True
+        try:
+            self._do_execute_rename()
+        finally:
+            # 如果 _do_execute_rename 已启动线程，会保持 _renaming=True；
+            # 如果提前返回（用户取消），重置标志
+            if self._renaming and not getattr(self, '_thread_started', False):
+                self._renaming = False
+
+    def _do_execute_rename(self):
         if not self.entries:
             messagebox.showwarning("提示", "没有可重命名的文件，请先扫描")
             return
@@ -1302,12 +1313,12 @@ class AniPrepApp:
         self.rename_btn.config(state=tk.DISABLED)
         self.status_text.set("正在重命名...")
         folders_to_rename = [f for f in self.folders if f.checked and f.new_name and f.new_name != f.original_name]
+        self._thread_started = True
         threading.Thread(
             target=execute_rename,
             args=(checked, folders_to_rename, self.result_queue),
             daemon=True,
         ).start()
-        self._renaming = True
 
     # ------------------------------------------------------------------
     #  队列轮询
@@ -1359,6 +1370,7 @@ class AniPrepApp:
 
                 elif kind == 'result':
                     self.rename_btn.config(state=tk.NORMAL)
+                    self._thread_started = False
                     success, fail = msg[1], msg[2]
                     self._refresh_table()
                     self.status_text.set(f"重命名完成：{success} 成功，{fail} 失败")
