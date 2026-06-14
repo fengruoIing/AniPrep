@@ -25,7 +25,14 @@ import requests
 #  配置持久化
 # ============================================================================
 
-CONFIG_PATH = Path(__file__).resolve().parent / "aniprep_config.json"
+import sys
+
+# 配置路径：EXE 和 .py 均指向可执行文件所在目录
+if getattr(sys, 'frozen', False):
+    _BASE_DIR = Path(sys.executable).parent
+else:
+    _BASE_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = _BASE_DIR / "aniprep_config.json"
 
 class Config:
     """全局配置，读写 JSON 文件"""
