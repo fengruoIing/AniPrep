@@ -586,38 +586,46 @@ def _scan_single_dir(dir_path: str, season: str, entries: list, root_path: str):
 # ============================================================================
 
 def execute_rename(entries: list[FileEntry], folders: list, result_queue: queue.Queue):
-    """在后台线程中批量重命名（先文件，后文件夹）。"""
+    """在后台线程中批量重命名（先文件，后文件夹）。
+    
+    使用快照数据，防止并发修改导致文件名错乱。
+    """
+    # 冻结快照：避免重命名期间 entry 被其他线程修改
+    snapshots = []
+    for e in entries:
+        if not e.checked:
+            continue
+        subs = [(s.original_path, os.path.join(e.parent_dir, sanitize_filename(s.new_name)),
+                 s.original_name)
+                for s in e.subtitles if s.sync_enabled]
+        snapshots.append({
+            'entry': e,
+            'old_path': e.original_path,
+            'new_path': os.path.join(e.parent_dir, sanitize_filename(e._new_name)),
+            'old_name': e.original_name,
+            'subs': subs,
+        })
+
     success = 0
     fail = 0
-    for i, entry in enumerate(entries):
-        if not entry.checked:
-            continue
+    total = len(snapshots)
 
-        new_dir = entry.parent_dir
+    for i, snap in enumerate(snapshots):
+        entry = snap['entry']
 
         # 重命名字幕
-        for sub in entry.subtitles:
-            if not sub.sync_enabled:
-                continue
-            old_path = sub.original_path
-            new_name = sanitize_filename(sub.new_name)
-            new_path = os.path.join(new_dir, new_name)
+        for sub_old, sub_new, sub_name in snap['subs']:
             try:
-                if old_path != new_path:
-                    os.rename(old_path, new_path)
-                    sub.original_path = new_path
+                if sub_old != sub_new and os.path.exists(sub_old):
+                    os.rename(sub_old, sub_new)
             except OSError as e:
-                result_queue.put(('progress', f'✗ 字幕失败: {sub.original_name} → {e}'))
-                fail += 1
+                result_queue.put(('progress', f'✗ 字幕失败: {sub_name} → {e}'))
 
         # 重命名视频
-        old_path = entry.original_path
-        new_name = sanitize_filename(entry._new_name)
-        new_path = os.path.join(new_dir, new_name)
         try:
-            if old_path != new_path:
-                os.rename(old_path, new_path)
-                entry.original_path = new_path
+            if snap['old_path'] != snap['new_path'] and os.path.exists(snap['old_path']):
+                os.rename(snap['old_path'], snap['new_path'])
+                entry.original_path = snap['new_path']
                 entry.status = '✓'
                 success += 1
             else:
@@ -627,7 +635,7 @@ def execute_rename(entries: list[FileEntry], folders: list, result_queue: queue.
             entry.status = f'✗ {e}'
             fail += 1
 
-        result_queue.put(('progress', f'[{i+1}/{len(entries)}] {entry.status} {entry.original_name}'))
+        result_queue.put(('progress', f'[{i+1}/{total}] {entry.status} {snap["old_name"]}'))
 
     # 后处理：重命名文件夹（深层优先）
     if folders:
