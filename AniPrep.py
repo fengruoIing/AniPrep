@@ -1362,11 +1362,11 @@ class AniPrepApp:
 
                 elif kind == 'result':
                     self.rename_btn.config(state=tk.NORMAL)
-                    self._renaming = False
                     success, fail = msg[1], msg[2]
                     self._refresh_table()
                     self.status_text.set(f"重命名完成：{success} 成功，{fail} 失败")
                     messagebox.showinfo("完成", f"重命名完成！\n成功: {success}\n失败: {fail}")
+                    self._renaming = False
 
         except queue.Empty:
             pass
