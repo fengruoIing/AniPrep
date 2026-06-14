@@ -590,7 +590,7 @@ def execute_rename(entries: list[FileEntry], folders: list, result_queue: queue.
     
     使用快照数据，防止并发修改导致文件名错乱。
     """
-    # 冻结快照：避免重命名期间 entry 被其他线程修改
+    # 冻结快照
     snapshots = []
     for e in entries:
         if not e.checked:
@@ -603,8 +603,13 @@ def execute_rename(entries: list[FileEntry], folders: list, result_queue: queue.
             'old_path': e.original_path,
             'new_path': os.path.join(e.parent_dir, sanitize_filename(e._new_name)),
             'old_name': e.original_name,
+            'episode': e.episode,    # 记下原始值
+            'new_name': e._new_name, # 记下原始值
             'subs': subs,
         })
+
+    # 先发一条调试信息
+    result_queue.put(('progress', f'快照: {len(snapshots)} 文件, ep={snapshots[0]["episode"]}..{snapshots[-1]["episode"]}'))
 
     success = 0
     fail = 0
@@ -619,7 +624,7 @@ def execute_rename(entries: list[FileEntry], folders: list, result_queue: queue.
                 if sub_old != sub_new and os.path.exists(sub_old):
                     os.rename(sub_old, sub_new)
             except OSError as e:
-                result_queue.put(('progress', f'✗ 字幕失败: {sub_name} → {e}'))
+                pass
 
         # 重命名视频
         try:
@@ -627,6 +632,11 @@ def execute_rename(entries: list[FileEntry], folders: list, result_queue: queue.
                 os.rename(snap['old_path'], snap['new_path'])
                 entry.original_path = snap['new_path']
                 entry.status = '✓'
+                # 回写确保 episode 和 _new_name 未被篡改
+                if entry.episode != snap['episode'] or entry._new_name != snap['new_name']:
+                    result_queue.put(('progress', f'⚠️ 数据被篡改: {snap["old_name"]} ep={entry.episode}(原{snap["episode"]}) new={entry._new_name}(原{snap["new_name"]})'))
+                    entry.episode = snap['episode']
+                    entry._new_name = snap['new_name']
                 success += 1
             else:
                 entry.status = '✓'
