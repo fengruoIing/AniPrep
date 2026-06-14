@@ -1285,6 +1285,12 @@ class AniPrepApp:
         import copy
         checked_copy = copy.deepcopy(checked)
 
+        # 诊断：弹出冻结时的前6条数据
+        diag_lines = [f"冻结: {len(checked_copy)}个文件"]
+        for e in checked_copy[:6]:
+            diag_lines.append(f"  ep={e.episode}  new={e._new_name[:50]}")
+        messagebox.showinfo("诊断-冻结时数据", "\n".join(diag_lines))
+
         tasks = []
         for i, e in enumerate(checked_copy):
             tasks.append({
@@ -1357,6 +1363,11 @@ class AniPrepApp:
                     self._refresh_table()
                     self.status_text.set(f"重命名完成：{success} 成功，{fail} 失败")
                     messagebox.showinfo("完成", f"重命名完成！\n成功: {success}\n失败: {fail}")
+                    # 诊断：完成后数据
+                    diag2 = ["完成后数据:"]
+                    for e in self.entries[:6]:
+                        diag2.append(f"  ep={e.episode}  new={e._new_name[:50]}")
+                    messagebox.showinfo("诊断-完成后数据", "\n".join(diag2))
                     self._renaming = False
 
         except queue.Empty:
