@@ -588,10 +588,8 @@ def _scan_single_dir(dir_path: str, season: str, entries: list, root_path: str):
 def execute_rename(tasks: list, folders: list, result_queue: queue.Queue):
     """在后台线程中批量重命名。
 
-    tasks: [{'ref': FileEntry, 'old_path': str, 'new_path': str,
-             'old_name': str, 'episode': str, 'new_name': str,
-             'subs': [(old, new), ...]}, ...]
-    所有路径数据已冻结，不依赖原始 entry 对象。
+    tasks: [{'orig_idx': int, 'old_path': str, 'new_path': str, 'old_name': str}, ...]
+    使用 deep copy 数据，完全不依赖原始 entry 对象。
     """
     success = 0
     fail = 0
@@ -599,7 +597,7 @@ def execute_rename(tasks: list, folders: list, result_queue: queue.Queue):
 
     for i, task in enumerate(tasks):
         # 重命名字幕
-        for sub_old, sub_new in task['subs']:
+        for sub_old, sub_new in task.get('subs', []):
             try:
                 if sub_old != sub_new and os.path.exists(sub_old):
                     os.rename(sub_old, sub_new)
@@ -610,20 +608,13 @@ def execute_rename(tasks: list, folders: list, result_queue: queue.Queue):
         try:
             if task['old_path'] != task['new_path'] and os.path.exists(task['old_path']):
                 os.rename(task['old_path'], task['new_path'])
-                task['ref'].original_path = task['new_path']
-                # 用冻结值覆盖可能被篡改的字段
-                task['ref'].episode = task['episode']
-                task['ref']._new_name = task['new_name']
-                task['ref'].status = '✓'
                 success += 1
             else:
-                task['ref'].status = '✓'
                 success += 1
         except OSError as e:
-            task['ref'].status = f'✗ {e}'
             fail += 1
 
-        result_queue.put(('progress', f'[{i+1}/{total}] {task["ref"].status} {task["old_name"]}'))
+        result_queue.put(('progress', f'[{i+1}/{total}] done {task["old_name"]}'))
 
     # 文件夹重命名
     if folders:
@@ -632,7 +623,6 @@ def execute_rename(tasks: list, folders: list, result_queue: queue.Queue):
                 new_path = os.path.join(f.parent_dir, sanitize_filename(f.new_name))
                 if new_path != f.original_path and os.path.exists(f.original_path):
                     os.rename(f.original_path, new_path)
-                    f.status = '✓'
             except OSError:
                 pass
 
@@ -1291,16 +1281,17 @@ class AniPrepApp:
         self.status_text.set("正在重命名...")
         folders_to_rename = [f for f in self.folders if f.checked and f.new_name and f.new_name != f.original_name]
 
-        # 冻结任务数据：脱离 entry 对象引用，纯字符串副本
+        # deep copy：完全脱离 self.entries，后续任何修改都不影响本次重命名
+        import copy
+        checked_copy = copy.deepcopy(checked)
+
         tasks = []
-        for e in checked:
+        for i, e in enumerate(checked_copy):
             tasks.append({
-                'ref': e,
+                'orig_idx': self.entries.index(checked[i]),
                 'old_path': e.original_path,
                 'new_path': os.path.join(e.parent_dir, sanitize_filename(e._new_name)),
                 'old_name': e.original_name,
-                'episode': e.episode,       # 冻结当前值
-                'new_name': e._new_name,    # 冻结当前值
                 'subs': [(s.original_path,
                           os.path.join(e.parent_dir, sanitize_filename(s.new_name)))
                          for s in e.subtitles if s.sync_enabled],
