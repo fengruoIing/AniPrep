@@ -676,6 +676,7 @@ class AniPrepApp:
         self.stats_text = tk.StringVar(value="")
         self.result_queue = queue.Queue()
         self._scan_overlay = None
+        self._renaming = False
         self._show_tmdb_column = tk.BooleanVar(value=False)
 
         # 配置根窗口背景
@@ -1752,8 +1753,11 @@ class AniPrepApp:
                     )
                 episodes[season_str] = eps
 
-            # 回到主线程更新 UI
+            # 回到主线程更新 UI（重命名进行中时跳过）
             def _update_ui():
+                if getattr(self, '_renaming', False):
+                    self._hide_scan_overlay()
+                    return
                 self.tmdb_tv_name = tv_name
                 self.tmdb_tv_year = tv_year
                 self.tmdb_tv_id = tv_id
@@ -1923,6 +1927,9 @@ class AniPrepApp:
 
     def _apply_season_offset(self):
         """检测跨季全局序号并自动偏移为季内从1开始。"""
+        if getattr(self, '_renaming', False):
+            return  # 重命名中不动数据
+
         season_set = set(e.season for e in self.entries)
         if len(season_set) <= 1:
             return
