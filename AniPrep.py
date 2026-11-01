@@ -15,6 +15,7 @@ import threading
 import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -172,27 +173,146 @@ PATH_LENGTH_WARN = 240
 # ============================================================================
 
 class Theme:
-    """全局色彩定义"""
-    bg              = "#F0F2F5"
-    surface         = "#FFFFFF"
-    text            = "#1A1A2E"
-    text_secondary  = "#6B7280"
-    accent          = "#6490F5"    # 更浅的蓝
-    accent_hover    = "#4F7DE8"
+    """全局色彩定义 — 浅色简洁风（slate + indigo）"""
+    # 背景层次
+    bg              = "#F4F6F9"    # 页面底色
+    surface         = "#FFFFFF"    # 卡片/面板
+    surface_alt     = "#F8FAFC"    # 次级面板（表头、子行）
+    surface_sunken  = "#F1F5F9"
+
+    # 文字
+    text            = "#0F172A"
+    text_secondary  = "#64748B"
+    text_muted      = "#94A3B8"
+
+    # 主色
+    accent          = "#4F6BED"
+    accent_hover    = "#4058D4"
+    accent_soft     = "#EEF1FE"
     accent_text     = "#FFFFFF"
-    success         = "#10B981"
-    warning         = "#D97706"
-    danger          = "#EF4444"
-    border          = "#D1D5DB"
-    grid            = "#AEB3BA"     # 表格列分隔线
-    scrollbar       = "#CBD5E1"
-    header_bg       = "#FFFFFF"
-    header_text     = "#1A1A2E"
-    table_alt       = "#F0F2F5"
-    table_hover     = "#EEF2FF"
-    table_selected  = "#E0E5FF"
+
+    # 语义色
+    success         = "#0E9F6E"
+    success_soft    = "#E7F8F1"
+    warning         = "#9A5B00"
+    warning_soft    = "#FFF8E7"
+    danger          = "#C62828"
+    danger_soft     = "#FEF3F2"
+
+    # 线条
+    border          = "#E4E9F0"
+    border_strong   = "#CBD5E1"
+    grid            = "#EEF2F6"
+    scrollbar       = "#CFD8E3"
+
+    # 表格
+    table_alt       = "#FAFBFD"
+    table_hover     = "#F4F7FF"
+    table_selected  = "#E9EEFF"
+
+    # 输入控件
     input_bg        = "#FFFFFF"
-    input_text      = "#1A1A2E"
+    input_text      = "#0F172A"
+
+    # 头部
+    header_bg       = "#FFFFFF"
+    header_text     = "#0F172A"
+
+
+class Fonts:
+    """运行时解析可用字体（中文优先），避免 Segoe UI 缺字回退导致的混排。"""
+
+    family = "Segoe UI"
+    mono   = "Consolas"
+    body = ("Segoe UI", 10)
+    small = ("Segoe UI", 9)
+    bold = ("Segoe UI", 10, "bold")
+    title = ("Segoe UI", 16, "bold")
+    btn = ("Segoe UI", 10)
+    btn_primary = ("Segoe UI", 11, "bold")
+    chip = ("Segoe UI", 9)
+
+    _UI_CANDIDATES = (
+        "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+        "Noto Sans CJK SC", "Source Han Sans SC", "Segoe UI", "Helvetica",
+    )
+    _MONO_CANDIDATES = ("Cascadia Mono", "Consolas", "Menlo", "Courier New")
+
+    @classmethod
+    def init(cls, root):
+        try:
+            available = set(tkfont.families(root))
+        except tk.TclError:
+            available = set()
+        for name in cls._UI_CANDIDATES:
+            if name in available:
+                cls.family = name
+                break
+        for name in cls._MONO_CANDIDATES:
+            if name in available:
+                cls.mono = name
+                break
+        f = cls.family
+        cls.body = (f, 10)
+        cls.small = (f, 9)
+        cls.bold = (f, 10, "bold")
+        cls.title = (f, 16, "bold")
+        cls.brand_sub = (f, 9)
+        cls.btn = (f, 10)
+        cls.btn_primary = (f, 11, "bold")
+        cls.chip = (f, 9)
+        cls.table = (f, 10)
+        cls.table_head = (f, 9, "bold")
+
+
+def draw_round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+    """在 Canvas 上画圆角矩形（平滑多边形近似）。"""
+    r = min(radius, (x2 - x1) / 2, (y2 - y1) / 2)
+    points = [
+        x1 + r, y1, x2 - r, y1, x2, y1,
+        x2, y1 + r, x2, y2 - r, x2, y2,
+        x2 - r, y2, x1 + r, y2, x1, y2,
+        x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+class Chip(tk.Canvas):
+    """圆角统计胶囊。"""
+
+    TONES = {
+        'neutral': ("#F1F5F9", "#64748B"),
+        'accent':  ("#EEF1FE", "#4058D4"),
+        'warn':    ("#FFF8E7", "#9A5B00"),
+        'danger':  ("#FEF3F2", "#C62828"),
+    }
+
+    def __init__(self, parent, text: str = "", tone: str = 'neutral', height: int = 24):
+        super().__init__(parent, height=height, highlightthickness=0, bd=0,
+                         bg=parent.cget('bg'))
+        self._height = height
+        self._text = text
+        self._tone = tone
+        self._font = tkfont.Font(family=Fonts.family, size=9)
+        self._redraw()
+
+    def set(self, text: str, tone: Optional[str] = None):
+        if tone:
+            self._tone = tone
+        self._text = text
+        self._redraw()
+
+    def _redraw(self):
+        self.delete('all')
+        bg, fg = self.TONES.get(self._tone, self.TONES['neutral'])
+        text_w = self._font.measure(self._text)
+        w = text_w + 22
+        h = self._height
+        self.configure(width=w)
+        draw_round_rect(self, 0, 0, w, h, h / 2, fill=bg, outline=bg)
+        self.create_text(w / 2, h / 2 + 1, text=self._text,
+                         fill=fg, font=self._font)
+
 
 
 # ============================================================================
@@ -645,13 +765,16 @@ class AniPrepApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("AniPrep — 动漫媒体文件规范化重命名工具")
-        self.root.geometry("1200x760")
-        self.root.minsize(900, 500)
+        self.root.title("AniPrep — 动漫媒体库规范化重命名")
+        self.root.geometry("1240x780")
+        self.root.minsize(960, 600)
 
         # 配置
         self.cfg = Config()
         self.root.geometry(self.cfg.window_geometry)
+
+        # 字体（依赖 root，必须先解析）
+        Fonts.init(self.root)
 
         # TMDB 客户端（懒初始化）
         self.tmdb: Optional[TMDBClient] = None
@@ -716,7 +839,7 @@ class AniPrepApp:
                             fg=Theme.text,
                             activebackground=Theme.accent,
                             activeforeground=Theme.accent_text)
-        file_menu.add_command(label="📁 选择文件夹", command=self._browse_folder)
+        file_menu.add_command(label="选择文件夹…", command=self._browse_folder)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.root.quit)
         menubar.add_cascade(label="文件", menu=file_menu)
@@ -727,7 +850,7 @@ class AniPrepApp:
                                 fg=Theme.text,
                                 activebackground=Theme.accent,
                                 activeforeground=Theme.accent_text)
-        settings_menu.add_command(label="🔑 TMDB API Key 设置...", command=self._set_api_key)
+        settings_menu.add_command(label="TMDB API Key 设置…", command=self._set_api_key)
         menubar.add_cascade(label="设置", menu=settings_menu)
 
         help_menu = tk.Menu(menubar, tearoff=0,
@@ -744,25 +867,40 @@ class AniPrepApp:
     # ------------------------------------------------------------------
 
     def _build_header(self):
-        """构建顶部标题横幅"""
-        self.header_frame = tk.Frame(self.root, bg=Theme.header_bg,
-                                     padx=24, pady=14)
+        """顶部品牌栏：图标 + 名称 + 副标题，右侧显示 TMDB 与版本"""
+        self.header_frame = tk.Frame(self.root, bg=Theme.header_bg)
         self.header_frame.pack(fill=tk.X)
 
-        title_container = tk.Frame(self.header_frame, bg=Theme.header_bg)
-        title_container.pack(side=tk.LEFT)
+        inner = tk.Frame(self.header_frame, bg=Theme.header_bg, padx=18, pady=11)
+        inner.pack(fill=tk.X)
 
-        tk.Label(title_container, text="AniPrep",
-                 font=('Segoe UI', 18, 'bold'),
-                 fg=Theme.accent,
-                 bg=Theme.header_bg).pack(side=tk.LEFT)
-        tk.Label(title_container, text=" 动漫媒体规范化重命名",
-                 font=('Segoe UI', 12),
-                 fg=Theme.text_secondary,
-                 bg=Theme.header_bg).pack(side=tk.LEFT, padx=(6, 0))
+        # 品牌图标（圆角方块 + 字母）
+        mark = tk.Canvas(inner, width=34, height=34, bg=Theme.header_bg,
+                         highlightthickness=0, bd=0)
+        mark.pack(side=tk.LEFT)
+        draw_round_rect(mark, 1, 1, 33, 33, 10, fill=Theme.accent, outline='')
+        mark.create_text(17, 17, text='A', fill=Theme.accent_text,
+                         font=(Fonts.family, 15, 'bold'))
 
-        # 分隔线
-        self.header_sep = tk.Frame(self.root, height=1, bg=Theme.accent)
+        titles = tk.Frame(inner, bg=Theme.header_bg)
+        titles.pack(side=tk.LEFT, padx=(11, 0))
+        tk.Label(titles, text="AniPrep", font=(Fonts.family, 15, 'bold'),
+                 fg=Theme.header_text, bg=Theme.header_bg).pack(anchor='w')
+        tk.Label(titles, text="动漫媒体库 · 规范化重命名 · Emby / Jellyfin",
+                 font=Fonts.brand_sub, fg=Theme.text_muted,
+                 bg=Theme.header_bg).pack(anchor='w')
+
+        # 右侧：TMDB 状态
+        right = tk.Frame(inner, bg=Theme.header_bg)
+        right.pack(side=tk.RIGHT)
+        self.tmdb_status = tk.Label(right, text='', font=Fonts.small,
+                                    fg=Theme.success, bg=Theme.header_bg)
+        self.tmdb_status.pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Label(right, text='v1.5', font=Fonts.small, fg=Theme.text_muted,
+                 bg=Theme.header_bg).pack(side=tk.RIGHT)
+
+        # 细分隔线
+        self.header_sep = tk.Frame(self.root, height=1, bg=Theme.border)
         self.header_sep.pack(fill=tk.X)
 
     # ------------------------------------------------------------------
@@ -770,51 +908,58 @@ class AniPrepApp:
     # ------------------------------------------------------------------
 
     def _build_control_bar(self):
-        """构建文件夹选择 & 操作按钮栏（两行布局）"""
-        self.control_frame = tk.Frame(self.root, bg=Theme.bg, padx=20, pady=12)
+        """工具卡片：路径行 + 选项行"""
+        self.control_frame = tk.Frame(self.root, bg=Theme.bg, padx=16, pady=12)
         self.control_frame.pack(fill=tk.X)
 
-        # ---- 第一行：路径选择 ----
-        row1 = tk.Frame(self.control_frame, bg=Theme.bg)
+        card = tk.Frame(self.control_frame, bg=Theme.surface,
+                        highlightbackground=Theme.border, highlightthickness=1)
+        card.pack(fill=tk.X)
+        pad = tk.Frame(card, bg=Theme.surface, padx=14, pady=12)
+        pad.pack(fill=tk.X)
+
+        # ---- 第一行：路径 + 浏览 + 扫描 ----
+        row1 = tk.Frame(pad, bg=Theme.surface)
         row1.pack(fill=tk.X)
 
-        tk.Label(row1, text='文件夹', font=('Segoe UI', 10, 'bold'),
-                 fg=Theme.text_secondary, bg=Theme.bg).pack(side=tk.LEFT)
+        tk.Label(row1, text='媒体库文件夹', font=Fonts.small,
+                 fg=Theme.text_secondary, bg=Theme.surface).pack(side=tk.LEFT, padx=(0, 10))
 
-        self.folder_entry = ttk.Entry(row1, textvariable=self.folder_path, width=44,
-                                      font=('Segoe UI', 12))
-        self.folder_entry.pack(side=tk.LEFT, padx=(6, 4))
+        self.folder_entry = ttk.Entry(row1, textvariable=self.folder_path,
+                                      font=Fonts.body)
+        self.folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         ttk.Button(row1, text='浏览', command=self._browse_folder,
-                   style='Secondary.TButton').pack(side=tk.LEFT, padx=2)
+                   style='Ghost.TButton').pack(side=tk.LEFT, padx=(8, 0))
         self.scan_btn = ttk.Button(row1, text='扫描', command=self._start_scan,
                                    style='Primary.TButton')
-        self.scan_btn.pack(side=tk.LEFT, padx=(2, 16))
+        self.scan_btn.pack(side=tk.LEFT, padx=(6, 0))
 
-        tk.Label(row1, text='默认季号', font=('Segoe UI', 10, 'bold'),
-                 fg=Theme.text_secondary, bg=Theme.bg).pack(side=tk.LEFT, padx=(0, 4))
+        # ---- 第二行：季号 + TMDB | 文件夹开关 + 批量选择 ----
+        row2 = tk.Frame(pad, bg=Theme.surface)
+        row2.pack(fill=tk.X, pady=(10, 0))
+
+        left2 = tk.Frame(row2, bg=Theme.surface)
+        left2.pack(side=tk.LEFT)
+
+        tk.Label(left2, text='默认季号', font=Fonts.small,
+                 fg=Theme.text_secondary, bg=Theme.surface).pack(side=tk.LEFT, padx=(0, 6))
         self.season_combo = ttk.Combobox(
-            row1, textvariable=self.default_season, width=3,
+            left2, textvariable=self.default_season, width=4,
             values=[f"{i:02d}" for i in range(0, 100)],
-            state='readonly', font=('Segoe UI', 12),
+            state='readonly', font=Fonts.body,
         )
         self.season_combo.pack(side=tk.LEFT)
 
-        # ---- 第二行：TMDB 按钮（左） + 快捷操作（右） ----
-        row2 = tk.Frame(self.control_frame, bg=Theme.bg)
-        row2.pack(fill=tk.X, pady=(6, 0))
+        tk.Frame(left2, width=1, bg=Theme.border).pack(side=tk.LEFT, fill=tk.Y,
+                                                       padx=(18, 16), pady=2)
 
-        left2 = tk.Frame(row2, bg=Theme.bg)
-        left2.pack(side=tk.LEFT)
+        self.tmdb_btn_search = ttk.Button(left2, text='TMDB 匹配',
+                                          command=self._search_tmdb,
+                                          style='Ghost.TButton')
+        self.tmdb_btn_search.pack(side=tk.LEFT)
 
-        self.tmdb_btn_search = ttk.Button(left2, text='🔍 TMDB 搜索',
-                                           command=self._search_tmdb,
-                                           style='Secondary.TButton')
-        self.tmdb_btn_search.pack(side=tk.LEFT, padx=2)
-        self.tmdb_status = tk.Label(left2, text='', font=('Segoe UI', 10),
-                                    fg=Theme.success, bg=Theme.bg)
-        self.tmdb_status.pack(side=tk.LEFT, padx=(6, 0))
-
-        right2 = tk.Frame(row2, bg=Theme.bg)
+        right2 = tk.Frame(row2, bg=Theme.surface)
         right2.pack(side=tk.RIGHT)
 
         self._rename_folders_var = tk.BooleanVar(value=self.cfg.rename_folders)
@@ -822,19 +967,22 @@ class AniPrepApp:
             right2, text='同步重命名文件夹',
             variable=self._rename_folders_var,
             command=self._on_toggle_rename_folders,
-            bg=Theme.bg, fg=Theme.text,
-            selectcolor=Theme.bg, activebackground=Theme.bg,
-            activeforeground=Theme.text,
-            font=('Segoe UI', 10),
+            bg=Theme.surface, fg=Theme.text_secondary,
+            activebackground=Theme.surface, activeforeground=Theme.text,
+            selectcolor=Theme.surface, font=Fonts.body,
+            bd=0, highlightthickness=0, cursor='hand2',
         )
-        self.chk_rename_folders.pack(side=tk.LEFT, padx=(0, 10))
+        self.chk_rename_folders.pack(side=tk.LEFT, padx=(0, 12))
+
+        tk.Frame(right2, width=1, bg=Theme.border).pack(side=tk.LEFT, fill=tk.Y,
+                                                        padx=(0, 12), pady=1)
 
         ttk.Button(right2, text='全选', command=self._select_all,
-                   style='Secondary.TButton').pack(side=tk.LEFT, padx=2)
-        ttk.Button(right2, text='取消全选', command=self._deselect_all,
-                   style='Secondary.TButton').pack(side=tk.LEFT, padx=2)
-        ttk.Button(right2, text='仅选中 ⚠️', command=self._select_warnings,
-                   style='Secondary.TButton').pack(side=tk.LEFT, padx=2)
+                   style='Ghost.TButton').pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(right2, text='清空选择', command=self._deselect_all,
+                   style='Ghost.TButton').pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(right2, text='仅警告项', command=self._select_warnings,
+                   style='Ghost.TButton').pack(side=tk.LEFT)
 
     # ------------------------------------------------------------------
     #  预览表格（增强版）
@@ -842,11 +990,13 @@ class AniPrepApp:
 
     def _build_table(self):
         self.table_frame = tk.Frame(self.root, bg=Theme.bg,
-                                    padx=20, pady=2)
-        self.table_frame.pack(fill=tk.BOTH, expand=True)
+                                    padx=16, pady=0)
+        self.table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
 
         # 表格容器（带边框效果）
-        self.table_inner = tk.Frame(self.table_frame, bg=Theme.border)
+        self.table_inner = tk.Frame(self.table_frame, bg=Theme.surface,
+                                    highlightbackground=Theme.border,
+                                    highlightthickness=1)
         self.table_inner.pack(fill=tk.BOTH, expand=True)
 
         columns = ('checked', 'season', 'episode', 'original', 'new_name', 'tmdb_name')
@@ -855,29 +1005,60 @@ class AniPrepApp:
             columns=columns,
             show='headings',
             selectmode='extended',
+            style='Card.Treeview',
+            height=6,
         )
 
-        self.tree.heading('checked', text='')
-        self.tree.heading('season', text='季')
-        self.tree.heading('episode', text='集')
-        self.tree.heading('original', text='原文件名')
-        self.tree.heading('new_name', text='新文件名')
-        self.tree.heading('tmdb_name', text='TMDB 集名')
+        self.tree.heading('checked', text='选', anchor='center')
+        self.tree.heading('season', text='季', anchor='center')
+        self.tree.heading('episode', text='集', anchor='center')
+        self.tree.heading('original', text='原文件名', anchor='w')
+        self.tree.heading('new_name', text='新文件名', anchor='w')
+        self.tree.heading('tmdb_name', text='TMDB 集名', anchor='w')
 
-        self.tree.column('checked', width=32, anchor='center', stretch=False)
-        self.tree.column('season', width=40, anchor='center', stretch=False)
-        self.tree.column('episode', width=50, anchor='center', stretch=False)
-        self.tree.column('original', width=300, minwidth=120)
-        self.tree.column('new_name', width=340, minwidth=140)
-        self.tree.column('tmdb_name', width=200, minwidth=60, stretch=True)
+        self.tree.column('checked', width=42, minwidth=42, anchor='center', stretch=False)
+        self.tree.column('season', width=52, minwidth=52, anchor='center', stretch=False)
+        self.tree.column('episode', width=52, minwidth=52, anchor='center', stretch=False)
+        self.tree.column('original', width=262, minwidth=140, stretch=True)
+        self.tree.column('new_name', width=300, minwidth=140, stretch=True)
+        self.tree.column('tmdb_name', width=180, minwidth=80, stretch=True)
 
         # 滚动条
-        vsb = ttk.Scrollbar(self.table_inner, orient=tk.VERTICAL, command=self.tree.yview)
-        hsb = ttk.Scrollbar(self.table_inner, orient=tk.HORIZONTAL, command=self.tree.xview)
+        vsb = ttk.Scrollbar(self.table_inner, orient=tk.VERTICAL,
+                            command=self.tree.yview, style='Card.Vertical.TScrollbar')
+        hsb = ttk.Scrollbar(self.table_inner, orient=tk.HORIZONTAL,
+                            command=self.tree.xview, style='Card.Horizontal.TScrollbar')
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        hsb.pack(side=tk.BOTTOM, fill=tk.X)
-        self.tree.pack(fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=6)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(2, 5))
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=(0, 0), pady=0)
+        self._vsb, self._hsb = vsb, hsb
+        self._sync_busy = False
+        self.tree.bind('<Configure>',
+                       lambda e: self.root.after_idle(self._sync_scrollbars))
+
+        # 空状态提示（无数据时覆盖在表格中央）
+        self._empty_state = tk.Frame(self.table_inner, bg=Theme.surface)
+        emark = tk.Canvas(self._empty_state, width=56, height=56,
+                          bg=Theme.surface, highlightthickness=0, bd=0)
+        emark.pack()
+        # 图标：圆角底 + 三条「列表」横条（不依赖字体符号）
+        draw_round_rect(emark, 2, 2, 54, 54, 17,
+                        fill=Theme.accent_soft, outline='')
+        for i, w in enumerate((22, 16, 22)):
+            y = 22 + i * 7
+            draw_round_rect(emark, 17, y, 17 + w, y + 3, 1.5,
+                            fill=Theme.accent, outline='')
+        tk.Label(self._empty_state, text='还没有扫描任何文件',
+                 font=(Fonts.family, 11, 'bold'), fg=Theme.text_secondary,
+                 bg=Theme.surface).pack(pady=(12, 3))
+        tk.Label(self._empty_state,
+                 text='选择一个媒体库文件夹，AniPrep 会解析季集号并生成新文件名',
+                 font=Fonts.small, fg=Theme.text_muted,
+                 bg=Theme.surface).pack()
+        ttk.Button(self._empty_state, text='选择文件夹',
+                   command=self._browse_folder,
+                   style='Primary.TButton').pack(pady=(14, 0))
 
         # 双击编辑季号/集号
         self.tree.bind('<Double-1>', self._on_double_click)
@@ -893,6 +1074,43 @@ class AniPrepApp:
 
         # Hover 状态
         self._hovered_iid = None
+        self._hover_saved = None
+
+        self._update_empty_state()
+
+    def _update_empty_state(self):
+        """表格为空时显示空状态提示。"""
+        if not hasattr(self, '_empty_state'):
+            return
+        if self.entries:
+            self._empty_state.place_forget()
+        elif not self._scan_overlay:
+            self._empty_state.place(relx=0.5, rely=0.45, anchor='center')
+
+    def _sync_scrollbars(self):
+        """内容不足一屏时自动隐藏滚动条，避免多余线条。"""
+        if not hasattr(self, '_vsb') or self._sync_busy:
+            return
+        self._sync_busy = True
+        try:
+            for _ in range(2):
+                y0, y1 = self.tree.yview()
+                need_v = (y0, y1) != (0.0, 1.0)
+                if need_v and not self._vsb.winfo_ismapped():
+                    self._vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5),
+                                   pady=6, before=self.tree)
+                elif not need_v and self._vsb.winfo_ismapped():
+                    self._vsb.pack_forget()
+
+                x0, x1 = self.tree.xview()
+                need_h = (x0, x1) != (0.0, 1.0)
+                if need_h and not self._hsb.winfo_ismapped():
+                    self._hsb.pack(side=tk.BOTTOM, fill=tk.X, padx=6,
+                                   pady=(2, 5), before=self.tree)
+                elif not need_h and self._hsb.winfo_ismapped():
+                    self._hsb.pack_forget()
+        finally:
+            self._sync_busy = False
 
     def _bind_hover(self):
         """绑定行悬停高亮"""
@@ -908,20 +1126,20 @@ class AniPrepApp:
             self._restore_row_tag(self._hovered_iid)
         self._hovered_iid = iid
         if iid and iid.startswith('v'):
-            tags = list(self.tree.item(iid, 'tags'))
-            if 'conflict' in tags:
+            tags = tuple(self.tree.item(iid, 'tags'))
+            # 语义行（警告/冲突/子行/文件夹）不参与 hover，避免底色叠加歧义
+            if any(t in ('conflict', 'warn', 'sub', 'sub_alt', 'sub_warn', 'folder')
+                   for t in tags):
                 return
-            tags.append('hover')
-            self.tree.item(iid, tags=tuple(tags))
+            self._hover_saved = tags
+            self.tree.item(iid, tags=('hover',))
 
     def _restore_row_tag(self, iid):
         """恢复一行的原始标签（移除 hover）"""
         if not self.tree.exists(iid):
             return
-        tags = list(self.tree.item(iid, 'tags'))
-        if 'hover' in tags:
-            tags.remove('hover')
-        self.tree.item(iid, tags=tuple(tags))
+        self.tree.item(iid, tags=self._hover_saved or ())
+        self._hover_saved = None
 
     def _clear_hover(self):
         """清除 hover 状态"""
@@ -930,71 +1148,70 @@ class AniPrepApp:
         self._hovered_iid = None
 
     def _setup_tags(self):
-        """配置表格行样式标签（颜色来自当前主题）。"""
+        """配置表格行样式标签（每行只挂一个底色标签，避免优先级歧义）。"""
         c = Theme
-        self.tree.tag_configure('warning', background=c.warning, foreground='#1A1A2E')
-        self.tree.tag_configure('subtitle', background=c.table_alt, foreground=c.text_secondary)
-        self.tree.tag_configure('conflict', background=c.danger, foreground='#FFFFFF')
-        self.tree.tag_configure('success', foreground=c.success)
-        self.tree.tag_configure('failed', foreground=c.danger)
-        self.tree.tag_configure('renamed', foreground=c.accent)
-        self.tree.tag_configure('hover', background=c.table_hover)
-        self.tree.tag_configure('even', background=c.table_alt)
-        # placeholder: 集号为空的行用斜体灰字提示
-        self.tree.tag_configure('empty_ep', foreground=c.text_secondary)
-        self.tree.tag_configure('folder', background=c.table_alt, font=('Segoe UI', 10, 'bold'))
+        self.tree.tag_configure('row_normal', background=c.surface, foreground=c.text)
+        self.tree.tag_configure('row_alt', background=c.table_alt, foreground=c.text)
+        self.tree.tag_configure('warn', background=c.warning_soft, foreground=c.warning)
+        self.tree.tag_configure('conflict', background=c.danger_soft, foreground=c.danger)
+        self.tree.tag_configure('sub', background=c.surface_alt, foreground=c.text_muted)
+        self.tree.tag_configure('sub_alt', background=c.surface_sunken, foreground=c.text_muted)
+        self.tree.tag_configure('sub_warn', background='#FDF6E8', foreground='#A97A2E')
+        self.tree.tag_configure('renamed', background=c.surface, foreground=c.text_muted)
+        self.tree.tag_configure('hover', background=c.table_hover, foreground=c.text)
+        self.tree.tag_configure('folder', background=c.surface_sunken,
+                                foreground=c.text_secondary,
+                                font=(Fonts.family, 10, 'bold'))
 
     # ------------------------------------------------------------------
     #  底部操作栏 & 状态栏
     # ------------------------------------------------------------------
 
     def _build_footer(self):
-        """构建底部区域：操作按钮 + 进度 + 统计芯片 + 状态"""
-        self.footer_frame = tk.Frame(self.root, bg=Theme.surface,
-                                     padx=20, pady=10)
+        """底部固定条：统计胶囊（左） + 状态文字与主操作（右）"""
+        sep = tk.Frame(self.root, height=1, bg=Theme.border)
+        sep.pack(fill=tk.X)
+
+        self.footer_frame = tk.Frame(self.root, bg=Theme.surface)
         self.footer_frame.pack(fill=tk.X)
 
-        # 左侧：统计芯片
-        left = tk.Frame(self.footer_frame, bg=Theme.surface)
+        inner = tk.Frame(self.footer_frame, bg=Theme.surface, padx=16, pady=10)
+        inner.pack(fill=tk.X)
+
+        # 左侧：统计胶囊
+        left = tk.Frame(inner, bg=Theme.surface)
         left.pack(side=tk.LEFT)
 
-        self.chip_total = self._make_chip(left, '📄 0')
-        self.chip_total.pack(side=tk.LEFT, padx=3)
-        self.chip_subs = self._make_chip(left, '📝 0')
-        self.chip_subs.pack(side=tk.LEFT, padx=3)
-        self.chip_warn = self._make_chip(left, '⚠️ 0')
-        self.chip_warn.pack(side=tk.LEFT, padx=3)
-        self.chip_conflict = self._make_chip(left, '❌ 0')
-        self.chip_conflict.pack(side=tk.LEFT, padx=3)
+        self.chip_total = self._make_chip(left, '视频 0')
+        self.chip_total.pack(side=tk.LEFT, padx=(0, 6))
+        self.chip_subs = self._make_chip(left, '字幕 0')
+        self.chip_subs.pack(side=tk.LEFT, padx=(0, 6))
+        self.chip_warn = self._make_chip(left, '警告 0')
+        self.chip_warn.pack(side=tk.LEFT, padx=(0, 6))
+        self.chip_conflict = self._make_chip(left, '冲突 0')
+        self.chip_conflict.pack(side=tk.LEFT)
 
-        # 右侧：状态文字 + 执行按钮
-        right = tk.Frame(self.footer_frame, bg=Theme.surface)
+        # 右侧：主按钮 + 状态文字
+        right = tk.Frame(inner, bg=Theme.surface)
         right.pack(side=tk.RIGHT)
-
-        self.status_label = tk.Label(
-            right, textvariable=self.status_text,
-            font=('Segoe UI', 10),
-            fg=Theme.text_secondary,
-            bg=Theme.surface,
-        )
-        self.status_label.pack(side=tk.RIGHT, padx=(0, 12))
 
         self.rename_btn = ttk.Button(
             right, text='执行重命名', command=self._execute_rename,
-            style='Accent.TButton',
+            style='Accent.TButton', state=tk.DISABLED,
         )
         self.rename_btn.pack(side=tk.RIGHT)
 
-    def _make_chip(self, parent, text):
-        """创建一个统计芯片标签"""
-        chip = tk.Label(
-            parent, text=text,
-            font=('Segoe UI', 10),
+        self.status_label = tk.Label(
+            right, textvariable=self.status_text,
+            font=Fonts.small,
             fg=Theme.text_secondary,
-            bg=Theme.table_alt,
-            padx=8, pady=2,
+            bg=Theme.surface,
         )
-        return chip
+        self.status_label.pack(side=tk.RIGHT, padx=(0, 14))
+
+    def _make_chip(self, parent, text):
+        """创建一个圆角统计胶囊"""
+        return Chip(parent, text)
 
     # ------------------------------------------------------------------
     #  事件处理 — 勾选切换
@@ -1154,7 +1371,8 @@ class AniPrepApp:
         self.scan_btn.config(state=tk.DISABLED, text='扫描中...')
 
         # 显示扫描中的覆盖提示
-        self._show_scan_overlay("🔍 正在扫描，请稍候...")
+        self._show_scan_overlay("正在扫描文件夹…")
+        self._update_empty_state()
 
         threading.Thread(
             target=scan_folder,
@@ -1163,23 +1381,41 @@ class AniPrepApp:
         ).start()
 
     def _show_scan_overlay(self, msg: str):
-        """在表格区域显示醒目的状态提示"""
+        """在表格中央显示带进度动画的提示卡片"""
         if not hasattr(self, 'table_frame'):
             return
         self._hide_scan_overlay()
-        self._scan_overlay = tk.Label(
-            self.table_frame,
-            text=msg,
-            font=('Segoe UI', 18, 'bold'),
-            fg=Theme.accent,
-            bg=Theme.bg,
-        )
-        self._scan_overlay.place(relx=0.5, rely=0.5, anchor='center')
+        self._empty_state.place_forget()
+
+        card = tk.Frame(self.table_frame, bg=Theme.surface,
+                        highlightbackground=Theme.border, highlightthickness=1)
+        tk.Label(card, text=msg, font=(Fonts.family, 11),
+                 fg=Theme.text, bg=Theme.surface).pack(padx=36, pady=(22, 0))
+        tk.Label(card, text='解析文件名中的季集号与字幕，请稍候',
+                 font=Fonts.small, fg=Theme.text_muted,
+                 bg=Theme.surface).pack(padx=36, pady=(4, 0))
+        pb = ttk.Progressbar(card, mode='indeterminate', length=236,
+                             style='Line.Horizontal.TProgressbar')
+        pb.pack(padx=36, pady=(14, 22))
+        card.place(relx=0.5, rely=0.45, anchor='center')
+        try:
+            pb.start(14)
+        except tk.TclError:
+            pass
+        self._scan_overlay = card
+        self._scan_pb = pb
 
     def _hide_scan_overlay(self):
+        if getattr(self, '_scan_pb', None) is not None:
+            try:
+                self._scan_pb.stop()
+            except tk.TclError:
+                pass
+            self._scan_pb = None
         if hasattr(self, '_scan_overlay') and self._scan_overlay:
             self._scan_overlay.destroy()
             self._scan_overlay = None
+        self._update_empty_state()
 
     def _select_all(self):
         for entry in self.entries:
@@ -1235,11 +1471,11 @@ class AniPrepApp:
         warnings = [e for e in checked if e.warning]
         if warnings:
             names = "\n".join(
-                f"  ⚠️ {e.original_name} — {e.warning}" for e in warnings[:10]
+                f"  · {e.original_name} — {e.warning}" for e in warnings[:10]
             )
             more = f"\n  ... 等共 {len(warnings)} 个" if len(warnings) > 10 else ""
             if not messagebox.askyesno(
-                "⚠️ 警告确认",
+                "警告确认",
                 f"以下 {len(warnings)} 个文件存在警告：\n{names}{more}\n\n是否仍要继续？"
             ):
                 self._renaming = False
@@ -1346,6 +1582,8 @@ class AniPrepApp:
                     self.scan_btn.config(state=tk.NORMAL, text='扫描')
                     # 自动偏移跨季集号
                     self._apply_season_offset()
+                    # 偏移后重建表格，确保界面与数据一致
+                    self._refresh_table()
                     # 自动 TMDB 搜索
                     self.root.after(100, self._auto_tmdb_search)
                     # msg = ('done', folder_entries, file_entries)
@@ -1386,8 +1624,8 @@ class AniPrepApp:
             return
 
         for i, f in enumerate(self.folders):
-            icon = '🗂️ 根目录' if f.kind == 'root' else '  🗂️ 季目录'
-            original_display = f.original_name
+            kind_label = '根目录' if f.kind == 'root' else '季目录'
+            original_display = f'{kind_label} · {f.original_name}'
             new_display = f.new_name or f.original_name
             checked = '●' if f.checked else '○'
             tags = ['folder']
@@ -1395,29 +1633,25 @@ class AniPrepApp:
             self.tree.insert(
                 '', i,
                 iid=iid,
-                values=(checked, '', '', f'{icon}  {original_display}', new_display, ''),
+                values=(checked, f.season or '', '', original_display,
+                        new_display, ''),
                 tags=tuple(tags),
             )
 
     def _insert_entry_row(self, entry: FileEntry, idx: int):
-        """插入一条视频行及其字幕子行（支持交替行色）"""
-        tags = []
-        if entry.already_renamed:
-            tags.append('renamed')
+        """插入一条视频行及其字幕子行（每行只挂一个底色标签）"""
         if entry.warning:
-            tags.append('warning')
-        if not entry.episode:
-            tags.append('empty_ep')
-        if idx % 2 == 1:
-            tags.append('even')
+            row_tag = 'warn'
+        elif entry.already_renamed:
+            row_tag = 'renamed'
+        else:
+            row_tag = 'row_alt' if idx % 2 == 1 else 'row_normal'
 
         if entry.already_renamed:
             checked_mark = '◇'   # 已改名不可操作
         else:
             checked_mark = '●' if entry.checked else '○'
         ep_display = entry.episode if entry.episode else '—'
-        if entry.episode and entry.warning:
-            ep_display = f"⚡{entry.episode}"
 
         # TMDB 集名
         tmdb_name = ''
@@ -1436,54 +1670,46 @@ class AniPrepApp:
             '', tk.END, iid=video_iid,
             values=(checked_mark, entry.season, ep_display,
                     entry.original_name, entry._new_name, tmdb_name),
-            tags=tuple(tags),
+            tags=(row_tag,),
         )
 
         # 插入字幕子行
+        if entry.warning:
+            sub_tag = 'sub_warn'
+        else:
+            sub_tag = 'sub_alt' if idx % 2 == 1 else 'sub'
         for sub in entry.subtitles:
-            sub_tags = ['subtitle']
-            if entry.warning:
-                sub_tags.append('warning')
-            if idx % 2 == 1:
-                sub_tags.append('even')
             self.tree.insert(
                 '', tk.END,
-                values=('└', '', '', f'  {sub.original_name}', sub.new_name, ''),
-                tags=tuple(sub_tags),
+                values=('▸', '', '', f'  {sub.original_name}', sub.new_name, ''),
+                tags=(sub_tag,),
             )
+
+        self._update_empty_state()
 
     def _refresh_table(self):
         """完全重建表格。"""
+        self._hovered_iid = None
+        self._hover_saved = None
         self.tree.delete(*self.tree.get_children())
         self._update_folder_rows()
         for i, entry in enumerate(self.entries):
             self._insert_entry_row(entry, i)
         self._refresh_conflicts()
         self._refresh_status()
+        self._update_empty_state()
+        self._sync_scrollbars()
 
     def _refresh_conflicts(self):
         """检查并高亮冲突行。"""
         conflicts = detect_conflicts(self.entries)
         for a, b, path in conflicts:
-            video_iid_a = f"v{a}"
-            video_iid_b = f"v{b}"
-            try:
-                current_tags_a = list(self.tree.item(video_iid_a, 'tags'))
-                if 'conflict' not in current_tags_a:
-                    current_tags_a.append('conflict')
-                self.tree.item(video_iid_a, tags=tuple(current_tags_a))
-            except tk.TclError:
-                pass
-            try:
-                current_tags_b = list(self.tree.item(video_iid_b, 'tags'))
-                if 'conflict' not in current_tags_b:
-                    current_tags_b.append('conflict')
-                self.tree.item(video_iid_b, tags=tuple(current_tags_b))
-            except tk.TclError:
-                pass
+            for iid in (f"v{a}", f"v{b}"):
+                if self.tree.exists(iid):
+                    self.tree.item(iid, tags=('conflict',))
 
     def _refresh_status(self):
-        """更新底部状态栏统计芯片"""
+        """更新底部统计胶囊与状态文字"""
         video_count = len(self.entries)
         sub_count = sum(len(e.subtitles) for e in self.entries)
         warning_count = sum(1 for e in self.entries if e.warning)
@@ -1492,17 +1718,12 @@ class AniPrepApp:
         empty_ep_count = sum(1 for e in self.entries if not e.episode)
         folder_count = len(self.folders)
 
-        c = Theme
-        self.chip_total.config(text=f'📄 {video_count}')
-        self.chip_subs.config(text=f'📝 {sub_count}')
-        if warning_count:
-            self.chip_warn.config(text=f'⚠️ {warning_count}', fg='#1A1A2E', bg=c.warning)
-        else:
-            self.chip_warn.config(text=f'⚠️ 0', fg=c.text_secondary, bg=c.table_alt)
-        if conflict_count:
-            self.chip_conflict.config(text=f'❌ {conflict_count}', fg='#FFFFFF', bg=c.danger)
-        else:
-            self.chip_conflict.config(text=f'❌ 0', fg=c.text_secondary, bg=c.table_alt)
+        self.chip_total.set(f'视频 {video_count}')
+        self.chip_subs.set(f'字幕 {sub_count}')
+        self.chip_warn.set(f'警告 {warning_count}',
+                           'warn' if warning_count else 'neutral')
+        self.chip_conflict.set(f'冲突 {conflict_count}',
+                               'danger' if conflict_count else 'neutral')
 
         status_parts = [f'{video_count} 视频', f'{sub_count} 字幕']
         if folder_count:
@@ -1515,6 +1736,14 @@ class AniPrepApp:
             status_parts.append(f'{warning_count} 需确认')
         self.status_text.set('  ·  '.join(status_parts))
 
+        # 没有可执行项时禁用主按钮
+        has_work = any(e.checked and e.episode for e in self.entries)
+        try:
+            self.rename_btn.config(
+                state=tk.NORMAL if has_work and not self._renaming else tk.DISABLED)
+        except tk.TclError:
+            pass
+
     # ------------------------------------------------------------------
     #  主题管理
     # ------------------------------------------------------------------
@@ -1526,168 +1755,157 @@ class AniPrepApp:
         # 根窗口
         self.root.configure(bg=c.bg)
 
-        # ttk 样式
         style = ttk.Style()
-        # 使用 clam 作为基底（可定制性最佳）
-        style.theme_use('clam')
+        try:
+            style.theme_use('clam')   # clam 可定制性最佳
+        except tk.TclError:
+            pass
+
+        def cfg(name, **opts):
+            """样式配置容错包装：某些选项在特定 ttk 主题下不存在。"""
+            try:
+                style.configure(name, **opts)
+            except tk.TclError:
+                pass
+
+        def mp(name, **opts):
+            try:
+                style.map(name, **opts)
+            except tk.TclError:
+                pass
 
         # 全局默认
-        style.configure('.',
-                        background=c.bg,
-                        foreground=c.text,
-                        font=('Segoe UI', 12))
-
-        # 框架
-        style.configure('TFrame', background=c.bg)
-
-        # 标签
-        style.configure('TLabel',
-                        background=c.bg,
-                        foreground=c.text,
-                        font=('Segoe UI', 12))
+        cfg('.', background=c.bg, foreground=c.text, font=Fonts.body)
+        cfg('TFrame', background=c.bg)
+        cfg('Card.TFrame', background=c.surface)
+        cfg('TLabel', background=c.bg, foreground=c.text, font=Fonts.body)
+        cfg('Muted.TLabel', background=c.surface, foreground=c.text_secondary,
+            font=Fonts.small)
 
         # 输入框
-        style.configure('TEntry',
-                        fieldbackground=c.input_bg,
-                        foreground=c.input_text,
-                        bordercolor=c.border,
-                        lightcolor=c.border,
-                        darkcolor=c.border)
-        style.map('TEntry',
-                  fieldbackground=[('disabled', c.bg)],
-                  bordercolor=[('focus', c.accent)])
+        cfg('TEntry',
+            fieldbackground=c.input_bg, foreground=c.input_text,
+            insertcolor=c.text, bordercolor=c.border_strong,
+            lightcolor=c.border_strong, darkcolor=c.border_strong,
+            padding=(8, 6), relief='flat')
+        mp('TEntry',
+           bordercolor=[('focus', c.accent)],
+           lightcolor=[('focus', c.accent)],
+           darkcolor=[('focus', c.accent)],
+           fieldbackground=[('disabled', c.surface_sunken)],
+           foreground=[('disabled', c.text_muted)])
 
         # Combobox
-        style.configure('TCombobox',
-                        fieldbackground=c.input_bg,
-                        foreground=c.input_text,
-                        background=c.input_bg,
-                        arrowcolor=c.text_secondary,
-                        bordercolor=c.border)
-        style.map('TCombobox',
-                  fieldbackground=[('readonly', c.input_bg)],
-                  foreground=[('readonly', c.input_text)])
+        cfg('TCombobox',
+            fieldbackground=c.input_bg, foreground=c.input_text,
+            background=c.surface, arrowcolor=c.text_secondary, arrowsize=13,
+            bordercolor=c.border_strong, lightcolor=c.border_strong,
+            darkcolor=c.border_strong, padding=(8, 4))
+        mp('TCombobox',
+           fieldbackground=[('readonly', c.input_bg)],
+           foreground=[('readonly', c.input_text)],
+           bordercolor=[('focus', c.accent), ('hover', c.border_strong)],
+           arrowcolor=[('active', c.accent)])
 
-        # 下拉列表
+        # 下拉列表（Windows 上只能靠 option 数据库）
         self.root.option_add('*TCombobox*Listbox.background', c.surface)
         self.root.option_add('*TCombobox*Listbox.foreground', c.text)
         self.root.option_add('*TCombobox*Listbox.selectBackground', c.accent)
         self.root.option_add('*TCombobox*Listbox.selectForeground', c.accent_text)
-        # 也通过 style 设置
-        style.configure('TCombobox.Listbox',
-                        background=c.surface,
-                        foreground=c.text,
-                        selectbackground=c.accent,
-                        selectforeground=c.accent_text)
+        self.root.option_add('*TCombobox*Listbox.borderWidth', 0)
 
-        # 主按钮
-        style.configure('Primary.TButton',
-                        background=c.accent,
-                        foreground=c.accent_text,
-                        borderwidth=0,
-                        focusthickness=0,
-                        padding=(18, 6),
-                        font=('Segoe UI', 10, 'bold'))
-        style.map('Primary.TButton',
-                  background=[('active', c.accent_hover), ('disabled', c.border)],
-                  foreground=[('disabled', c.text_secondary)])
+        # --- 按钮 ---
+        # 主按钮（实心）
+        cfg('Primary.TButton',
+            background=c.accent, foreground=c.accent_text,
+            borderwidth=0, focusthickness=0, focuscolor=c.accent,
+            padding=(18, 7), relief='flat', font=Fonts.bold,
+            bordercolor=c.accent, lightcolor=c.accent, darkcolor=c.accent)
+        mp('Primary.TButton',
+           background=[('disabled', '#C7D2E8'), ('pressed', c.accent_hover),
+                       ('active', c.accent_hover)],
+           foreground=[('disabled', '#F5F7FB')])
 
-        # 强调按钮
-        style.configure('Accent.TButton',
-                        background=c.accent,
-                        foreground=c.accent_text,
-                        borderwidth=0,
-                        focusthickness=0,
-                        padding=(22, 8),
-                        font=('Segoe UI', 11, 'bold'))
-        style.map('Accent.TButton',
-                  background=[('active', c.accent_hover), ('disabled', c.border)])
+        # 主操作按钮（更大）
+        cfg('Accent.TButton',
+            background=c.accent, foreground=c.accent_text,
+            borderwidth=0, focusthickness=0, focuscolor=c.accent,
+            padding=(26, 9), relief='flat', font=Fonts.btn_primary,
+            bordercolor=c.accent, lightcolor=c.accent, darkcolor=c.accent)
+        mp('Accent.TButton',
+           background=[('disabled', '#C7D2E8'), ('pressed', c.accent_hover),
+                       ('active', c.accent_hover)],
+           foreground=[('disabled', '#F5F7FB')])
 
-        # 次要按钮
-        style.configure('Secondary.TButton',
-                        background=c.surface,
-                        foreground=c.text,
-                        borderwidth=1,
-                        bordercolor=c.border,
-                        focusthickness=0,
-                        padding=(14, 6),
-                        font=('Segoe UI', 10))
-        style.map('Secondary.TButton',
-                  background=[('active', c.table_hover)])
+        # 次级按钮（白底细描边）
+        cfg('Ghost.TButton',
+            background=c.surface, foreground='#334155',
+            borderwidth=1, relief='solid', focusthickness=0, focuscolor=c.surface,
+            padding=(14, 6), font=Fonts.btn,
+            bordercolor='#D3DCE7', lightcolor='#D3DCE7', darkcolor='#D3DCE7')
+        mp('Ghost.TButton',
+           background=[('pressed', c.accent_soft), ('active', '#F4F7FF'),
+                       ('disabled', c.surface)],
+           foreground=[('active', c.accent_hover), ('pressed', c.accent_hover),
+                       ('disabled', c.text_muted)],
+           bordercolor=[('active', '#B9C6D6')],
+           lightcolor=[('active', '#B9C6D6')],
+           darkcolor=[('active', '#B9C6D6')])
 
-        # 工具按钮
-        style.configure('Tool.TButton',
-                        background=c.bg,
-                        foreground=c.text_secondary,
-                        borderwidth=1,
-                        bordercolor=c.border,
-                        focusthickness=0,
-                        padding=(10, 4),
-                        font=('Segoe UI', 10))
-        style.map('Tool.TButton',
-                  background=[('active', c.table_hover)],
-                  foreground=[('active', c.text)])
+        # 兼容旧样式名
+        cfg('Secondary.TButton',
+            background=c.surface, foreground='#334155',
+            borderwidth=1, relief='solid', focusthickness=0, padding=(14, 6),
+            font=Fonts.btn, bordercolor='#D3DCE7',
+            lightcolor='#D3DCE7', darkcolor='#D3DCE7')
+        mp('Secondary.TButton',
+           background=[('active', '#F4F7FF')],
+           foreground=[('active', c.accent_hover)])
+
+        # 勾选框（放在白色卡片上）
+        cfg('Card.TCheckbutton',
+            background=c.surface, foreground=c.text_secondary,
+            focuscolor=c.surface, font=Fonts.body)
 
         # 进度条
-        style.configure('TProgressbar',
-                        background=c.accent,
-                        troughcolor=c.table_alt,
-                        bordercolor=c.border,
-                        lightcolor=c.accent,
-                        darkcolor=c.accent,
-                        thickness=6)
+        cfg('TProgressbar',
+            background=c.accent, troughcolor=c.surface_sunken,
+            bordercolor=c.surface_sunken, lightcolor=c.accent,
+            darkcolor=c.accent, thickness=5)
+        cfg('Line.Horizontal.TProgressbar',
+            background=c.accent, troughcolor=c.surface_sunken,
+            bordercolor=c.surface_sunken, lightcolor=c.accent,
+            darkcolor=c.accent, thickness=5)
 
-        # Treeview 整体
-        style.configure('Treeview',
-                        background=c.surface,
-                        foreground=c.text,
-                        fieldbackground=c.grid,
-                        bordercolor=c.border,
-                        rowheight=32,
-                        padding=1,
-                        font=('Segoe UI', 12))
-        style.map('Treeview',
-                  background=[('selected', c.table_selected)],
-                  foreground=[('selected', c.text)])
+        # --- 表格 ---
+        cfg('Card.Treeview',
+            background=c.surface, fieldbackground=c.surface,
+            foreground=c.text, bordercolor=c.border,
+            borderwidth=1, relief='flat', rowheight=30,
+            font=Fonts.table)
+        mp('Card.Treeview',
+           background=[('selected', c.table_selected)],
+           foreground=[('selected', c.text)])
 
-        # Treeview 表头
-        style.configure('Treeview.Heading',
-                        background=c.header_bg,
-                        foreground=c.text_secondary,
-                        font=('Segoe UI', 10, 'bold'),
-                        borderwidth=1,
-                        relief='solid')
-        style.map('Treeview.Heading',
-                  background=[('active', c.table_hover)],
-                  foreground=[('active', c.text)])
+        cfg('Card.Treeview.Heading',
+            background=c.surface_alt, foreground=c.text_secondary,
+            font=Fonts.table_head, borderwidth=0, relief='flat',
+            padding=(10, 9), bordercolor=c.border)
+        mp('Card.Treeview.Heading',
+           background=[('active', c.table_hover)],
+           foreground=[('active', c.text)])
 
-        # Treeitem 单元格：注入 1px 右边框实线
-        try:
-            style.layout('Treeview.Item', [
-                ('Treeitem.padding', {'children': [
-                    ('Treeitem.border', {'children': [
-                        ('Treeitem.focus', {'children': [
-                            ('Treeitem.text', {'sticky': 'nswe'})
-                        ], 'sticky': 'nswe'})
-                    ], 'sticky': 'nswe', 'border': '1', 'relief': 'solid'})
-                ], 'sticky': 'nswe'})
-            ])
-        except tk.TclError:
-            pass
+        # --- 滚动条（无箭头，细长条）---
+        for orient in ('Vertical', 'Horizontal'):
+            cfg(f'Card.{orient}.TScrollbar',
+                background=c.scrollbar, troughcolor=c.surface,
+                bordercolor=c.surface, lightcolor=c.scrollbar,
+                darkcolor=c.scrollbar, arrowcolor=c.surface,
+                gripcount=0, arrowsize=0, relief='flat')
+            mp(f'Card.{orient}.TScrollbar',
+               background=[('active', c.text_muted)])
 
-        # 滚动条
-        style.configure('TScrollbar',
-                        background=c.scrollbar,
-                        troughcolor=c.bg,
-                        bordercolor=c.bg,
-                        arrowcolor=c.text_secondary,
-                        gripcount=0,
-                        arrowsize=14)
-        style.map('TScrollbar',
-                  background=[('active', c.text_secondary)])
-
-        # 分隔线
-        style.configure('TSeparator', background=c.border)
+        cfg('TSeparator', background=c.border)
 
         # 更新自定义标签
         self._setup_tags()
@@ -1721,7 +1939,7 @@ class AniPrepApp:
             self.cfg.set('tmdb_api_key', key.strip())
             self.tmdb = None  # 重置客户端
             if key.strip():
-                self.tmdb_status.config(text='🔑 已设置', fg=Theme.success)
+                self.tmdb_status.config(text='已设置 API Key', fg=Theme.success)
             else:
                 self.tmdb_status.config(text='')
 
@@ -1808,62 +2026,71 @@ class AniPrepApp:
 
         # 搜索弹窗
         dlg = tk.Toplevel(self.root)
-        dlg.title("TMDB 搜索剧集")
-        dlg.geometry("580x520")
+        dlg.title("TMDB 匹配剧集")
+        dlg.geometry("620x560")
         dlg.configure(bg=Theme.bg)
         dlg.transient(self.root)
         dlg.grab_set()
 
-        # 搜索栏
-        search_frame = tk.Frame(dlg, bg=Theme.bg, padx=12, pady=12)
-        search_frame.pack(fill=tk.X)
+        # 搜索卡片
+        top = tk.Frame(dlg, bg=Theme.bg, padx=16, pady=14)
+        top.pack(fill=tk.X)
 
-        tk.Label(search_frame, text='搜索剧名：', font=('Segoe UI', 12),
-                 bg=Theme.bg, fg=Theme.text).pack(side=tk.LEFT)
+        card = tk.Frame(top, bg=Theme.surface,
+                        highlightbackground=Theme.border, highlightthickness=1)
+        card.pack(fill=tk.X)
+        cpad = tk.Frame(card, bg=Theme.surface, padx=14, pady=12)
+        cpad.pack(fill=tk.X)
+
+        tk.Label(cpad, text='搜索剧名', font=Fonts.small,
+                 bg=Theme.surface, fg=Theme.text_secondary).pack(anchor='w')
+
+        search_row = tk.Frame(cpad, bg=Theme.surface)
+        search_row.pack(fill=tk.X, pady=(6, 0))
 
         # 智能提取标题
         folder_name = os.path.basename(os.path.normpath(self.folder_path.get())) or ''
         clean_title = extract_clean_title(folder_name)
         query_var = tk.StringVar(value=clean_title)
-        query_entry = ttk.Entry(search_frame, textvariable=query_var, width=30,
-                                font=('Segoe UI', 12))
-        query_entry.pack(side=tk.LEFT, padx=6)
+        query_entry = ttk.Entry(search_row, textvariable=query_var,
+                                font=Fonts.body)
+        query_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         query_entry.select_range(0, tk.END)
         query_entry.focus_set()
 
         # 显示原始文件夹名供参考
         if clean_title != folder_name:
-            hint_frame = tk.Frame(dlg, bg=Theme.bg)
-            hint_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
-            tk.Label(hint_frame, text=f'原始：{folder_name}',
-                     font=('Segoe UI', 9), fg=Theme.text_secondary, bg=Theme.bg,
-                     wraplength=540).pack(anchor='w')
+            tk.Label(cpad, text=f'来自文件夹：{folder_name}',
+                     font=Fonts.small, fg=Theme.text_muted, bg=Theme.surface,
+                     wraplength=540, justify='left').pack(anchor='w', pady=(8, 0))
 
         # 结果列表
-        list_frame = tk.Frame(dlg, bg=Theme.bg)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=12)
+        list_frame = tk.Frame(dlg, bg=Theme.surface,
+                              highlightbackground=Theme.border, highlightthickness=1)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=16)
 
         columns = ('name', 'year', 'lang')
         tree = ttk.Treeview(list_frame, columns=columns, show='headings',
-                            selectmode='browse', height=8)
-        tree.heading('name', text='剧名')
-        tree.heading('year', text='首播年份')
-        tree.heading('lang', text='语言')
-        tree.column('name', width=340)
-        tree.column('year', width=80, anchor='center')
-        tree.column('lang', width=60, anchor='center')
+                            selectmode='browse', height=8, style='Card.Treeview')
+        tree.heading('name', text='剧名', anchor='w')
+        tree.heading('year', text='首播年份', anchor='center')
+        tree.heading('lang', text='语言', anchor='center')
+        tree.column('name', width=380, minwidth=180, stretch=True)
+        tree.column('year', width=90, anchor='center', stretch=False)
+        tree.column('lang', width=70, anchor='center', stretch=False)
+
+        vsb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview,
+                            style='Card.Vertical.TScrollbar')
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=6)
         tree.pack(fill=tk.BOTH, expand=True)
 
-        vsb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # 按钮
-        btn_frame = tk.Frame(dlg, bg=Theme.bg, padx=12, pady=12)
+        # 底部操作区
+        btn_frame = tk.Frame(dlg, bg=Theme.bg, padx=16, pady=12)
         btn_frame.pack(fill=tk.X)
 
         result_label = tk.Label(btn_frame, text='', bg=Theme.bg, fg=Theme.text_secondary,
-                                font=('Segoe UI', 10))
+                                font=Fonts.small)
         result_label.pack(side=tk.LEFT)
 
         def do_search():
@@ -1932,13 +2159,13 @@ class AniPrepApp:
             dlg.destroy()
 
         query_entry.bind('<Return>', lambda e: do_search())
-        ttk.Button(search_frame, text='搜索', command=do_search,
-                   style='Primary.TButton').pack(side=tk.LEFT, padx=4)
+        ttk.Button(search_row, text='搜索', command=do_search,
+                   style='Primary.TButton').pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Button(btn_frame, text='确认选择', command=on_select,
-                   style='Accent.TButton').pack(side=tk.RIGHT, padx=4)
+                   style='Accent.TButton').pack(side=tk.RIGHT)
         ttk.Button(btn_frame, text='取消', command=dlg.destroy,
-                   style='Secondary.TButton').pack(side=tk.RIGHT, padx=4)
+                   style='Ghost.TButton').pack(side=tk.RIGHT, padx=(0, 8))
 
         # 自动搜索
         if folder_name:
@@ -2000,8 +2227,6 @@ class AniPrepApp:
         if changed:
             for e in self.entries:
                 compute_new_names(e)
-            for e in self.entries:
-                compute_new_names(e)
 
     def _on_tmdb_loaded(self):
         """TMDB 数据加载后：自动偏移跨季集号 + 刷新 TMDB 列"""
@@ -2053,7 +2278,7 @@ class AniPrepApp:
             "3. 在表格中审核结果：\n"
             "   - 单击 ☑ 列勾选/取消文件\n"
             "   - 双击「季」或「集」列编辑序号\n"
-            "   - ⚠️ 黄底行表示集号 > 500 需要确认\n"
+            "   - 琥珀色行表示集号可疑，需要确认\n"
             "4. 点击「执行重命名」批量重命名\n\n"
             "命名格式：S{季号}E{集号}_{原文件名}.ext\n"
             "字幕文件会自动同步重命名。"
