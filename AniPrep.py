@@ -11,6 +11,8 @@ AniPrep 动漫媒体文件规范化重命名工具
 
 import os
 import re
+import sys
+import ctypes
 import threading
 import queue
 import tkinter as tk
@@ -25,8 +27,6 @@ import requests
 # ============================================================================
 #  配置持久化
 # ============================================================================
-
-import sys
 
 # 配置路径：EXE 和 .py 均指向可执行文件所在目录
 if getattr(sys, 'frozen', False):
@@ -314,6 +314,128 @@ class Chip(tk.Canvas):
                          fill=fg, font=self._font)
 
 
+class FolderDropHook:
+    """让 Tk 窗口接受「从资源管理器拖入文件夹」。
+
+    Tk 本身没有拖放支持，这里用纯 ctypes 实现：给窗口及其所有子控件挂上
+    WS_EX_ACCEPTFILES，并子类化它们的窗口过程来接收 WM_DROPFILES。
+    不依赖第三方库，打包时无需额外数据文件；非 Windows 或失败时静默降级。
+
+    注意：窗口过程由 Tcl 的消息循环调用，里面**不能调任何 tkinter API**
+    （Tcl 会在 C 层释放/恢复线程状态，与 ctypes 回调的 GIL 状态冲突，
+    实测会直接 fatal error）。因此回调只把路径放进队列，由 Tk 定时器取走。
+    """
+
+    WM_DROPFILES = 0x0233
+    GWL_WNDPROC = -4
+
+    def __init__(self, root_widget):
+        self._pending = []
+        self._originals = {}
+        self._proc = None
+        self._ok = False
+        if os.name != 'nt':
+            return
+        try:
+            self._install(root_widget)
+            self._ok = True
+        except Exception:
+            self._ok = False
+
+    @property
+    def enabled(self) -> bool:
+        return self._ok
+
+    def take_pending(self) -> list:
+        """取走已入队的拖入路径（只能从 Tk 线程调用）。"""
+        if not self._pending:
+            return []
+        items, self._pending = self._pending, []
+        return items
+
+    # ------------------------------------------------------------------
+    def _install(self, widget):
+        user32 = ctypes.windll.user32
+        shell32 = ctypes.windll.shell32
+
+        wndproc_t = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p,
+                                       ctypes.c_uint, ctypes.c_size_t,
+                                       ctypes.c_ssize_t)
+        self._proc = wndproc_t(self._wndproc)   # 必须持有引用，否则会被 GC
+
+        user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+        user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                             ctypes.c_void_p]
+        user32.CallWindowProcW.restype = ctypes.c_ssize_t
+        user32.CallWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                           ctypes.c_uint, ctypes.c_size_t,
+                                           ctypes.c_ssize_t]
+
+        top = int(widget.winfo_id())
+        for hwnd in [top] + self._descendants(top):
+            shell32.DragAcceptFiles(ctypes.c_void_p(hwnd), True)
+            old = user32.SetWindowLongPtrW(ctypes.c_void_p(hwnd), self.GWL_WNDPROC,
+                                           ctypes.cast(self._proc, ctypes.c_void_p))
+            if old:
+                self._originals[hwnd] = old
+
+        if not self._originals:
+            raise OSError('cannot subclass window procedure')
+
+    @staticmethod
+    def _descendants(hwnd):
+        """枚举所有子窗口（Tk 的每个控件都是一个子窗口）。"""
+        user32 = ctypes.windll.user32
+        found = []
+        cb_t = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+        def _cb(h, _param):
+            found.append(int(h))
+            return 1
+
+        user32.EnumChildWindows(ctypes.c_void_p(hwnd), cb_t(_cb), None)
+        return found
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        if msg == self.WM_DROPFILES:
+            try:
+                paths = self._read_drop(wparam)
+                if paths:
+                    self._pending.append(paths)   # 只碰 Python 对象
+            except Exception:
+                pass
+            finally:
+                try:
+                    ctypes.windll.shell32.DragFinish(ctypes.c_void_p(wparam))
+                except Exception:
+                    pass
+            return 0
+        old = self._originals.get(int(hwnd) if hwnd else 0)
+        if not old:
+            return 0
+        return ctypes.windll.user32.CallWindowProcW(
+            ctypes.c_void_p(old), ctypes.c_void_p(hwnd), msg, wparam, lparam)
+
+    @staticmethod
+    def _read_drop(hdrop):
+        """把 HDROP 句柄解析成路径列表。"""
+        shell32 = ctypes.windll.shell32
+        shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                           ctypes.c_wchar_p, ctypes.c_uint]
+        shell32.DragQueryFileW.restype = ctypes.c_uint
+        count = shell32.DragQueryFileW(ctypes.c_void_p(hdrop), 0xFFFFFFFF, None, 0)
+        paths = []
+        for i in range(count):
+            size = shell32.DragQueryFileW(ctypes.c_void_p(hdrop), i, None, 0)
+            if not size:
+                continue
+            buf = ctypes.create_unicode_buffer(size + 1)
+            shell32.DragQueryFileW(ctypes.c_void_p(hdrop), i, buf, size + 1)
+            if buf.value:
+                paths.append(buf.value)
+        return paths
+
+
 
 # ============================================================================
 #  数据模型
@@ -423,42 +545,114 @@ def extract_episode_number(filename_stem: str) -> Optional[int]:
 #  核心逻辑 — 字幕匹配
 # ============================================================================
 
-def extract_clean_title(folder_name: str) -> str:
-    """从文件夹名中提取干净的剧名。
+def _ascii_word(token: str) -> str:
+    """把短标记包装成「两侧不是英文字母」的断言。
 
-    剥离常见标记：开头的 [压制组]、编码参数 (...) 等。
+    Python 的 \\b 把汉字也算作单词字符，所以 "[TV全集]" 里 \\bTV\\b 匹配不到；
+    用 ASCII 边界代替，同时避免把 "[SPY×FAMILY]" 里的 SP 当成特典标记。
+    """
+    return rf'(?<![A-Za-z]){token}(?![A-Za-z])'
+
+
+# 出现在括号里即视为技术信息的关键词（发布组、编码、分辨率、字幕/语言标记…）
+_TECH_PATTERNS = [
+    r'\d{2,4}[pPkK]',                       # 1080p 720P
+    r'\d{3,4}\s*[xX×]\s*\d{3,4}',           # 1920x1080
+    r'\d{0,2}bit',                          # 10bit / 8bit
+    _ascii_word(r'BD(?:Rip|MV)?'), r'Blu-?ray', r'DVD(?:Rip)?',
+    _ascii_word(r'WEB(?:-?DL|-?Rip)?'), _ascii_word(r'HDTV'),
+    r'[xXhH]\.?26[45]', r'HEVC', r'AVC', r'Hi10P', r'Ma10p',
+    r'FLAC', r'EAC3', r'TrueHD', r'AAC', r'AC3', r'DTS', r'MP3',
+    r'MKV', r'MP4', r'AVI',
+    r'简繁', r'简体', r'繁体', r'简日', r'繁日', r'中日', r'双语',
+    r'外挂', r'内嵌', r'字幕', r'全集', r'特典', r'映像',
+    _ascii_word(r'CHS'), _ascii_word(r'CHT'), _ascii_word(r'GB'),
+    _ascii_word(r'BIG5'), _ascii_word(r'JPN'), _ascii_word(r'JPSC'),
+    _ascii_word(r'JPTC'), _ascii_word(r'JP'), _ascii_word(r'EN'),
+    _ascii_word(r'TV'), _ascii_word(r'OVA'), _ascii_word(r'SP'),
+    r'NCOP', r'NCED', r'Ver\.?\s*\d',
+    r'Baha', r'B-?Global', r'Bilibili', r'ABEMA', r'Crunchyroll', r'Netflix',
+    r'\d{1,4}\s*[-~～]\s*\d{1,4}',          # 集数范围 01-12
+]
+_TECH_RE = re.compile('|'.join(_TECH_PATTERNS), re.I)
+
+# 方括号组：半角 []、全角 【】 与 ［］
+_GROUP_RE = re.compile(r'\[[^\[\]]*\]|【[^【】]*】|［[^［］]*］')
+_LEADING_GROUPS_RE = re.compile(r'^(?:(?:\[[^\[\]]*\]|【[^【】]*】|［[^［］]*］)\s*)+')
+# 纯数字 / 版本号 / 特典号 的括号组
+_BARE_NOISE_RE = re.compile(r'\d{1,4}|[Vv]\d{1,2}|[Ss][Pp]\d*')
+
+
+def _is_noise_group(content: str) -> bool:
+    """判断一个括号里的内容是不是技术信息（该整组丢弃）。"""
+    text = content.strip()
+    if not text:
+        return True
+    if _BARE_NOISE_RE.fullmatch(text):
+        return True
+    return bool(_TECH_RE.search(text))
+
+
+def extract_clean_title(folder_name: str) -> str:
+    """从文件夹名中提取干净的剧名，供 TMDB 搜索使用。
+
+    处理顺序：先剔技术括号组 → 再判开头发布组 → 去技术圆括号 → 去壳 → 收尾。
+    永不返回空串（兜底返回原始文件夹名），避免调用方拿到空查询词。
+
     例：
-      [ANK-Raws] Omamori Himari (BDrip 1920x1080 x264 FLAC)
-      → Omamori Himari
+      [SweetSub&VCB-Studio] DARLING in the FRANXX [Ma10p_1080p]
+      → DARLING in the FRANXX
+      [Nekomoe kissaten][Bocchi the Rock!][01-12][1080p][CHS_JPN]
+      → Bocchi the Rock!
       [DBD-Raws][邪神与厨二病少女][01-12TV全集][1080P][BDRip][FLAC]
       → 邪神与厨二病少女
     """
-    import re
-    name = folder_name.strip()
+    raw = folder_name.strip()
+    name = raw
 
-    # 1. 剥离所有开头的 ASCII 方括号块（压制组/来源），不含 CJK 的视为标题保留
-    name = re.sub(r'^(?:\[[ -~]+\]\s*)+', '', name).strip()
+    # 1. 丢弃技术性的括号组（分辨率/编码/字幕/集数范围…）
+    name = _GROUP_RE.sub(
+        lambda m: '' if _is_noise_group(m.group(0)[1:-1]) else m.group(0), name
+    ).strip()
 
-    # 2. 去除杂项方括号（集数范围、分辨率、编码、字幕标记等技术信息）
-    tech_sq = r'\[[^\]]*(?:\d{2,4}[PpKk]|BDRip|BD|Blu-ray|DVD|WEB|HDTV|' \
-              r'x264|x265|H264|H265|HEVC|AVC|Hi10P|10bit|8bit|' \
-              r'FLAC|AAC|MP3|AC3|DTS|MKV|MP4|' \
-              r'简繁|外挂|CHS|CHT|GB|BIG5|' \
-              r'TV|全集|特典|映像|OVA|SP)[^\]]*\]'
-    name = re.sub(tech_sq, '', name, flags=re.I).strip()
+    # 2. 处理开头的发布组括号
+    m = _LEADING_GROUPS_RE.match(name)
+    if m:
+        groups = _GROUP_RE.findall(m.group(0))
+        tail = name[m.end():].strip()
+        if tail:
+            # 括号外还有内容 → 开头的括号都是组名，整段丢掉
+            name = tail
+        elif groups:
+            # 整串都在括号里 → 最后一组才是标题
+            name = groups[-1][1:-1].strip()
 
-    # 3. 去除技术参数圆括号
-    tech_rn = r'\([^)]*\b(?:BD|BDRip|Blu-ray|DVD|WEB|TV|HDTV|' \
-              r'1080|720|480|2160|4K|8K|' \
-              r'x264|x265|H264|H265|HEVC|AVC|FLAC|AAC|MP3|AC3|DTS|' \
-              r'Hi10P|10bit|8bit|MKV|MP4|' \
-              r'简繁|外挂|GB|BIG5|CHS|CHT|JP|EN|Sub|ASS|SRT)[^)]*\)'
-    name = re.sub(tech_rn, '', name, flags=re.I).strip()
+    # 3. 丢弃技术性的圆括号
+    name = re.sub(
+        r'[（(][^）)]*[）)]',
+        lambda mm: '' if _TECH_RE.search(mm.group(0)) else mm.group(0),
+        name,
+    ).strip()
 
-    # 4. 剩余方括号全部剥除（tech 已去，剩下的就是标题本身）
-    name = re.sub(r'\[([^\]]+)\]', r'\1', name).strip()
-    # 5. 清理多余空格
-    name = re.sub(r'\s+', ' ', name).strip()
+    # 4. 剩下的方括号去掉壳（此时里面就是标题/副标题）
+    name = _GROUP_RE.sub(lambda mm: mm.group(0)[1:-1].strip(), name)
+
+    # 5. 装饰性符号：★…★ / ※ / 各类圆点
+    name = re.sub(r'[★☆].*?[★☆]', ' ', name)
+    name = re.sub(r'[※◆■●▲◇]', ' ', name)
+
+    # 6. 结尾的集号标记：「 - 01」；「 - S2」这类季标记要保留
+    name = re.sub(r'\s*[-–—_]\s*\d{1,4}\s*$', '', name)
+
+    # 7. 中日双语并列的标题取前半（Fate / stay night 这类纯英文名不受影响）
+    if re.search(r'\s*[/／]\s*', name) and re.search(r'[\u4e00-\u9fff]', name):
+        name = re.split(r'\s*[/／]\s*', name, maxsplit=1)[0]
+
+    name = re.sub(r'\s+', ' ', name).strip(' -_·.')
+
+    # 8. 兜底：宁可让 TMDB 搜原始名，也不要给个空查询词
+    if not name:
+        return re.sub(r'\s+', ' ', raw)
     return name
 
 
@@ -811,8 +1005,42 @@ class AniPrepApp:
         # 定时轮询队列
         self._poll_queue()
 
+        # 支持把文件夹直接拖进窗口（Windows，纯 ctypes 实现）
+        self._drop_hook = FolderDropHook(self.root)
+
         # 窗口关闭时保存配置
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _handle_drop(self, paths):
+        """处理拖入的路径：文件夹直接用；拖的是文件则取其所在目录。
+
+        若文件所在目录本身就是分季目录（S1 / Season 01 / 第1季），
+        则再上一层到剧集根目录，否则季号会丢。
+        """
+        if self._renaming:
+            return
+        if str(self.scan_btn.cget('state')) == 'disabled':
+            return                     # 正在扫描，忽略
+
+        target = None
+        for p in paths:
+            if os.path.isdir(p):
+                target = p
+                break
+            if os.path.isfile(p):
+                parent = os.path.dirname(p)
+                grand = os.path.dirname(parent)
+                if (grand and os.path.isdir(grand)
+                        and extract_season_from_folder(os.path.basename(parent))
+                        is not None):
+                    parent = grand
+                target = parent
+                break
+        if not target or not os.path.isdir(target):
+            return
+
+        self.folder_path.set(target)
+        self._start_scan()
 
     def _on_close(self):
         """窗口关闭时保存状态"""
@@ -1053,7 +1281,7 @@ class AniPrepApp:
                  font=(Fonts.family, 11, 'bold'), fg=Theme.text_secondary,
                  bg=Theme.surface).pack(pady=(12, 3))
         tk.Label(self._empty_state,
-                 text='选择一个媒体库文件夹，AniPrep 会解析季集号并生成新文件名',
+                 text='点击「选择文件夹」，或直接把文件夹拖到这里',
                  font=Fonts.small, fg=Theme.text_muted,
                  bg=Theme.surface).pack()
         ttk.Button(self._empty_state, text='选择文件夹',
@@ -1607,6 +1835,12 @@ class AniPrepApp:
         except queue.Empty:
             pass
         finally:
+            # 取走拖入的路径（窗口过程里不能调 tkinter，只能在这里处理）
+            try:
+                for paths in self._drop_hook.take_pending():
+                    self._handle_drop(paths)
+            except Exception:
+                pass
             self.root.after(100, self._poll_queue)
 
     # ------------------------------------------------------------------
@@ -2172,57 +2406,80 @@ class AniPrepApp:
             dlg.after(200, do_search)
 
     def _apply_season_offset(self):
-        """检测跨季全局序号并自动偏移为季内从1开始。
-        
-        仅当某季最小集号明显大于累积偏移时才执行偏移，
-        防止已按季编号的文件被错误重编号。
+        """把跨季的全局集号（如 S2 从 13 开始）换算成季内编号。
+
+        规则：
+        1. 特典季（S00）不参与累计，也不做偏移；
+        2. 每季的「全局起始集号」= 前面所有季的集数 + 1，前面的季优先用
+           TMDB 集数，取 max(TMDB, 本季文件数)——用户文件比 TMDB 多时，
+           说明他手上的编号是跟着文件走的；
+        3. 只有当最小集号恰好落在 [起始集号, 起始集号+本季集数) 区间时，
+           才认定为全局编号并偏移；否则原样保留（宁可不动，也不猜）；
+        4. 偏移后超出本季集数的行打警告，让用户确认。
         """
         if getattr(self, '_renaming', False):
             return
 
-        season_set = set(e.season for e in self.entries)
-        if len(season_set) <= 1:
+        # 特典季不参与
+        seasons = sorted({e.season for e in self.entries
+                          if e.season and e.season != "00"})
+        if len(seasons) <= 1:
             return
 
-        sorted_seasons = sorted(season_set)
+        def file_count(s):
+            return sum(1 for e in self.entries
+                       if e.season == s and e.episode and not e.already_renamed)
 
-        # 计算每季累积偏移：优先用 TMDB，否则用本季文件数
-        offsets = {}
-        cumulative = 0
-        for s in sorted_seasons:
-            offsets[s] = cumulative
-            if self.tmdb_episodes and s in self.tmdb_episodes:
-                cumulative += len(self.tmdb_episodes[s])
-            else:
-                count_in_season = sum(1 for e in self.entries if e.season == s)
-                cumulative += count_in_season
+        def season_count(s):
+            tmdb_n = len(self.tmdb_episodes.get(s) or {})
+            return max(tmdb_n, file_count(s))
 
-        # 检测：如果某季的首集号 <= 累积偏移+1，说明已经是季内编号，不偏移
+        def prev_total(s):
+            """该季之前（不含特典）累计的集数。"""
+            keys = set(self.tmdb_episodes) | set(seasons)
+            return sum(season_count(t) for t in keys
+                       if t != "00" and t < s)
+
         changed = False
-        for s in sorted_seasons:
-            offset = offsets[s]
-            if offset == 0:
-                continue  # 第一季无需偏移
-            season_files = [e for e in self.entries if e.season == s and e.episode]
-            if not season_files:
+        for s in seasons:
+            files = [e for e in self.entries
+                     if e.season == s and e.episode and not e.already_renamed]
+            if not files:
                 continue
-            try:
-                min_ep = min(int(e.episode) for e in season_files)
-            except ValueError:
-                continue
-            # 如果该季最小集号已经 <= offset（即接近1），说明是季内编号，跳过
-            if min_ep <= offset:
+            nums = [int(e.episode) for e in files if e.episode.isdigit()]
+            if not nums:
                 continue
 
-            # 全局编号：需要偏移
-            for e in season_files:
+            offset = prev_total(s)          # 前几季的总集数 == 需要减掉的量
+            if offset <= 0:
+                continue                    # 第一季无需偏移
+            count = season_count(s) or len(files)
+            min_ep = min(nums)
+
+            # 判据：最小集号必须落在本季的全局区间内，否则视为已按季编号
+            if not (offset + 1 <= min_ep < offset + 1 + count):
+                continue
+
+            max_after = 0
+            for e in files:
                 try:
-                    ep_num = int(e.episode)
-                    if ep_num > offset:
-                        e.episode = str(ep_num - offset)
-                        changed = True
+                    num = int(e.episode)
                 except ValueError:
-                    pass
+                    continue
+                if num <= offset:
+                    continue
+                e.episode = str(num - offset)
+                changed = True
+                max_after = max(max_after, num - offset)
+
+            if max_after > count:
+                warn = f"跨季偏移后集号 {max_after} 超出本季集数 ({count})"
+                for e in files:
+                    if e.warning:
+                        if warn not in e.warning:
+                            e.warning += "；" + warn
+                    else:
+                        e.warning = warn
 
         if changed:
             for e in self.entries:
