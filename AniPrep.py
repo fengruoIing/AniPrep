@@ -43,10 +43,12 @@ class Config:
         "last_root_folder": "",
         "rename_folders": False,
         "window_geometry": "1160x720",
+        "ui_scale": 1.0,          # 保存窗口尺寸时使用的界面缩放比
     }
 
     def __init__(self):
         self._data = dict(self._defaults)
+        self._file_keys = set()
         self._load()
 
     def _load(self):
@@ -57,8 +59,13 @@ class Config:
                 for k in self._defaults:
                     if k in loaded:
                         self._data[k] = loaded[k]
+                self._file_keys = {k for k in loaded if k in self._defaults}
         except Exception:
             pass
+
+    def from_file(self, key: str) -> bool:
+        """该键是否来自配置文件（用于区分「旧配置没有这个键」）。"""
+        return key in self._file_keys
 
     def save(self):
         try:
@@ -166,6 +173,65 @@ SUSPICIOUS_EPISODE = 500
 
 # 路径长度警告阈值
 PATH_LENGTH_WARN = 240
+
+
+# ============================================================================
+#  高 DPI 支持
+# ============================================================================
+#
+#  Tk 默认不做 DPI 感知，Windows 会把整个窗口当位图拉伸（150% 下字发虚）。
+#  这里让进程按物理像素渲染（文字变清晰），同时把所有「设计稿像素」用 px()
+#  按缩放比换算，否则字变大了、间距没变，界面会挤成一团。
+#  注意：点值字号由 Tk 按 DPI 自动放大，不需要额外处理。
+
+DPI_SCALE = 1.0        # 界面缩放比，1.0 == 96dpi
+
+
+def px(value: float) -> int:
+    """设计稿像素 → 当前屏幕的实际像素。"""
+    if DPI_SCALE == 1.0:
+        return int(round(value))
+    return int(round(value * DPI_SCALE))
+
+
+def enable_dpi_awareness():
+    """在创建 Tk 之前调用，让窗口按物理像素渲染（消除位图拉伸导致的模糊）。"""
+    if os.name != 'nt':
+        return
+    try:
+        # PROCESS_SYSTEM_DPI_AWARE：跟随系统缩放，窗口不会被拉伸
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def detect_ui_scale(root) -> float:
+    """读取当前屏幕缩放比；可用 ANIPREP_UI_SCALE 环境变量强制指定。"""
+    forced = os.environ.get('ANIPREP_UI_SCALE')
+    if forced:
+        try:
+            return max(1.0, float(forced))
+        except ValueError:
+            pass
+    try:
+        return max(1.0, root.winfo_fpixels('1i') / 96.0)
+    except Exception:
+        return 1.0
+
+
+def _scale_geometry(geometry: str, factor: float) -> str:
+    """把 "1240x780+100+50" 按比例缩放。"""
+    m = re.fullmatch(r'(\d+)x(\d+)([+-]\d+)([+-]\d+)', geometry.strip())
+    if not m or factor == 1.0:
+        return geometry
+    w, h, x, y = m.groups()
+    return (f"{int(int(w) * factor)}x{int(int(h) * factor)}"
+            f"{int(int(x) * factor):+d}{int(int(y) * factor):+d}")
 
 
 # ============================================================================
@@ -288,9 +354,9 @@ class Chip(tk.Canvas):
     }
 
     def __init__(self, parent, text: str = "", tone: str = 'neutral', height: int = 24):
-        super().__init__(parent, height=height, highlightthickness=0, bd=0,
+        self._height = px(height)
+        super().__init__(parent, height=self._height, highlightthickness=0, bd=0,
                          bg=parent.cget('bg'))
-        self._height = height
         self._text = text
         self._tone = tone
         self._font = tkfont.Font(family=Fonts.family, size=9)
@@ -306,7 +372,7 @@ class Chip(tk.Canvas):
         self.delete('all')
         bg, fg = self.TONES.get(self._tone, self.TONES['neutral'])
         text_w = self._font.measure(self._text)
-        w = text_w + 22
+        w = text_w + px(22)
         h = self._height
         self.configure(width=w)
         draw_round_rect(self, 0, 0, w, h, h / 2, fill=bg, outline=bg)
@@ -959,13 +1025,18 @@ class AniPrepApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
+
+        # 界面缩放比必须先算出来，后面所有 px() 都依赖它
+        global DPI_SCALE
+        DPI_SCALE = detect_ui_scale(root)
+
         self.root.title("AniPrep — 动漫媒体库规范化重命名")
-        self.root.geometry("1240x780")
-        self.root.minsize(960, 600)
+        self.root.geometry(f"{px(1240)}x{px(780)}")
+        self.root.minsize(px(960), px(600))
 
         # 配置
         self.cfg = Config()
-        self.root.geometry(self.cfg.window_geometry)
+        self._restore_geometry()
 
         # 字体（依赖 root，必须先解析）
         Fonts.init(self.root)
@@ -1042,10 +1113,35 @@ class AniPrepApp:
         self.folder_path.set(target)
         self._start_scan()
 
+    def _restore_geometry(self):
+        """恢复上次的窗口尺寸。
+
+        旧版本是 DPI 不感知的，配置里存的是「被系统拉伸过的逻辑像素」，
+        需要换算成物理像素，才能保持同样大的窗口。
+        注意：ui_scale 只在保存尺寸时一起写入，这里不能回写，
+        否则「尺寸还是旧值、缩放比已更新」的错配会把窗口夹到最小尺寸。
+        """
+        geom = (self.cfg.window_geometry or '').strip()
+        if not geom:
+            return
+        if not self.cfg.from_file('ui_scale'):
+            factor = DPI_SCALE                     # 旧配置：逻辑像素 → 物理像素
+        else:
+            try:
+                saved = float(self.cfg.ui_scale or 1.0)
+            except (TypeError, ValueError):
+                saved = 1.0
+            factor = DPI_SCALE / saved if saved else 1.0
+        try:
+            self.root.geometry(_scale_geometry(geom, factor))
+        except tk.TclError:
+            pass
+
     def _on_close(self):
         """窗口关闭时保存状态"""
         try:
             self.cfg.set('window_geometry', self.root.geometry())
+            self.cfg.set('ui_scale', DPI_SCALE)
         except Exception:
             pass
         self.root.destroy()
@@ -1099,19 +1195,22 @@ class AniPrepApp:
         self.header_frame = tk.Frame(self.root, bg=Theme.header_bg)
         self.header_frame.pack(fill=tk.X)
 
-        inner = tk.Frame(self.header_frame, bg=Theme.header_bg, padx=18, pady=11)
+        inner = tk.Frame(self.header_frame, bg=Theme.header_bg,
+                         padx=px(18), pady=px(11))
         inner.pack(fill=tk.X)
 
         # 品牌图标（圆角方块 + 字母）
-        mark = tk.Canvas(inner, width=34, height=34, bg=Theme.header_bg,
+        side = px(34)
+        mark = tk.Canvas(inner, width=side, height=side, bg=Theme.header_bg,
                          highlightthickness=0, bd=0)
         mark.pack(side=tk.LEFT)
-        draw_round_rect(mark, 1, 1, 33, 33, 10, fill=Theme.accent, outline='')
-        mark.create_text(17, 17, text='A', fill=Theme.accent_text,
+        draw_round_rect(mark, 1, 1, side - 1, side - 1, px(10),
+                        fill=Theme.accent, outline='')
+        mark.create_text(side / 2, side / 2, text='A', fill=Theme.accent_text,
                          font=(Fonts.family, 15, 'bold'))
 
         titles = tk.Frame(inner, bg=Theme.header_bg)
-        titles.pack(side=tk.LEFT, padx=(11, 0))
+        titles.pack(side=tk.LEFT, padx=(px(11), 0))
         tk.Label(titles, text="AniPrep", font=(Fonts.family, 15, 'bold'),
                  fg=Theme.header_text, bg=Theme.header_bg).pack(anchor='w')
         tk.Label(titles, text="动漫媒体库 · 规范化重命名 · Emby / Jellyfin",
@@ -1123,8 +1222,8 @@ class AniPrepApp:
         right.pack(side=tk.RIGHT)
         self.tmdb_status = tk.Label(right, text='', font=Fonts.small,
                                     fg=Theme.success, bg=Theme.header_bg)
-        self.tmdb_status.pack(side=tk.RIGHT, padx=(8, 0))
-        tk.Label(right, text='v1.5', font=Fonts.small, fg=Theme.text_muted,
+        self.tmdb_status.pack(side=tk.RIGHT, padx=(px(8), 0))
+        tk.Label(right, text='v1.6', font=Fonts.small, fg=Theme.text_muted,
                  bg=Theme.header_bg).pack(side=tk.RIGHT)
 
         # 细分隔线
@@ -1137,13 +1236,13 @@ class AniPrepApp:
 
     def _build_control_bar(self):
         """工具卡片：路径行 + 选项行"""
-        self.control_frame = tk.Frame(self.root, bg=Theme.bg, padx=16, pady=12)
+        self.control_frame = tk.Frame(self.root, bg=Theme.bg, padx=px(16), pady=px(12))
         self.control_frame.pack(fill=tk.X)
 
         card = tk.Frame(self.control_frame, bg=Theme.surface,
                         highlightbackground=Theme.border, highlightthickness=1)
         card.pack(fill=tk.X)
-        pad = tk.Frame(card, bg=Theme.surface, padx=14, pady=12)
+        pad = tk.Frame(card, bg=Theme.surface, padx=px(14), pady=px(12))
         pad.pack(fill=tk.X)
 
         # ---- 第一行：路径 + 浏览 + 扫描 ----
@@ -1151,27 +1250,27 @@ class AniPrepApp:
         row1.pack(fill=tk.X)
 
         tk.Label(row1, text='媒体库文件夹', font=Fonts.small,
-                 fg=Theme.text_secondary, bg=Theme.surface).pack(side=tk.LEFT, padx=(0, 10))
+                 fg=Theme.text_secondary, bg=Theme.surface).pack(side=tk.LEFT, padx=(0, px(10)))
 
         self.folder_entry = ttk.Entry(row1, textvariable=self.folder_path,
                                       font=Fonts.body)
         self.folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         ttk.Button(row1, text='浏览', command=self._browse_folder,
-                   style='Ghost.TButton').pack(side=tk.LEFT, padx=(8, 0))
+                   style='Ghost.TButton').pack(side=tk.LEFT, padx=(px(8), 0))
         self.scan_btn = ttk.Button(row1, text='扫描', command=self._start_scan,
                                    style='Primary.TButton')
-        self.scan_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self.scan_btn.pack(side=tk.LEFT, padx=(px(6), 0))
 
         # ---- 第二行：季号 + TMDB | 文件夹开关 + 批量选择 ----
         row2 = tk.Frame(pad, bg=Theme.surface)
-        row2.pack(fill=tk.X, pady=(10, 0))
+        row2.pack(fill=tk.X, pady=(px(10), 0))
 
         left2 = tk.Frame(row2, bg=Theme.surface)
         left2.pack(side=tk.LEFT)
 
         tk.Label(left2, text='默认季号', font=Fonts.small,
-                 fg=Theme.text_secondary, bg=Theme.surface).pack(side=tk.LEFT, padx=(0, 6))
+                 fg=Theme.text_secondary, bg=Theme.surface).pack(side=tk.LEFT, padx=(0, px(6)))
         self.season_combo = ttk.Combobox(
             left2, textvariable=self.default_season, width=4,
             values=[f"{i:02d}" for i in range(0, 100)],
@@ -1180,7 +1279,7 @@ class AniPrepApp:
         self.season_combo.pack(side=tk.LEFT)
 
         tk.Frame(left2, width=1, bg=Theme.border).pack(side=tk.LEFT, fill=tk.Y,
-                                                       padx=(18, 16), pady=2)
+                                                       padx=(px(18), px(16)), pady=px(2))
 
         self.tmdb_btn_search = ttk.Button(left2, text='TMDB 匹配',
                                           command=self._search_tmdb,
@@ -1200,13 +1299,13 @@ class AniPrepApp:
             selectcolor=Theme.surface, font=Fonts.body,
             bd=0, highlightthickness=0, cursor='hand2',
         )
-        self.chk_rename_folders.pack(side=tk.LEFT, padx=(0, 12))
+        self.chk_rename_folders.pack(side=tk.LEFT, padx=(0, px(12)))
 
         tk.Frame(right2, width=1, bg=Theme.border).pack(side=tk.LEFT, fill=tk.Y,
-                                                        padx=(0, 12), pady=1)
+                                                        padx=(0, px(12)), pady=px(1))
 
         ttk.Button(right2, text='全选', command=self._select_all,
-                   style='Ghost.TButton').pack(side=tk.LEFT, padx=(0, 4))
+                   style='Ghost.TButton').pack(side=tk.LEFT, padx=(0, px(4)))
         ttk.Button(right2, text='清空选择', command=self._deselect_all,
                    style='Ghost.TButton').pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(right2, text='仅警告项', command=self._select_warnings,
@@ -1218,8 +1317,8 @@ class AniPrepApp:
 
     def _build_table(self):
         self.table_frame = tk.Frame(self.root, bg=Theme.bg,
-                                    padx=16, pady=0)
-        self.table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+                                    padx=px(16), pady=0)
+        self.table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, px(12)))
 
         # 表格容器（带边框效果）
         self.table_inner = tk.Frame(self.table_frame, bg=Theme.surface,
@@ -1244,12 +1343,12 @@ class AniPrepApp:
         self.tree.heading('new_name', text='新文件名', anchor='w')
         self.tree.heading('tmdb_name', text='TMDB 集名', anchor='w')
 
-        self.tree.column('checked', width=42, minwidth=42, anchor='center', stretch=False)
-        self.tree.column('season', width=52, minwidth=52, anchor='center', stretch=False)
-        self.tree.column('episode', width=52, minwidth=52, anchor='center', stretch=False)
-        self.tree.column('original', width=262, minwidth=140, stretch=True)
-        self.tree.column('new_name', width=300, minwidth=140, stretch=True)
-        self.tree.column('tmdb_name', width=180, minwidth=80, stretch=True)
+        self.tree.column('checked', width=px(42), minwidth=px(42), anchor='center', stretch=False)
+        self.tree.column('season', width=px(52), minwidth=px(52), anchor='center', stretch=False)
+        self.tree.column('episode', width=px(52), minwidth=px(52), anchor='center', stretch=False)
+        self.tree.column('original', width=px(262), minwidth=px(140), stretch=True)
+        self.tree.column('new_name', width=px(300), minwidth=px(140), stretch=True)
+        self.tree.column('tmdb_name', width=px(180), minwidth=px(80), stretch=True)
 
         # 滚动条
         vsb = ttk.Scrollbar(self.table_inner, orient=tk.VERTICAL,
@@ -1257,8 +1356,8 @@ class AniPrepApp:
         hsb = ttk.Scrollbar(self.table_inner, orient=tk.HORIZONTAL,
                             command=self.tree.xview, style='Card.Horizontal.TScrollbar')
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=6)
-        hsb.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(2, 5))
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, px(5)), pady=px(6))
+        hsb.pack(side=tk.BOTTOM, fill=tk.X, padx=px(6), pady=(px(2), px(5)))
         self.tree.pack(fill=tk.BOTH, expand=True, padx=(0, 0), pady=0)
         self._vsb, self._hsb = vsb, hsb
         self._sync_busy = False
@@ -1267,26 +1366,27 @@ class AniPrepApp:
 
         # 空状态提示（无数据时覆盖在表格中央）
         self._empty_state = tk.Frame(self.table_inner, bg=Theme.surface)
-        emark = tk.Canvas(self._empty_state, width=56, height=56,
+        icon = px(56)
+        emark = tk.Canvas(self._empty_state, width=icon, height=icon,
                           bg=Theme.surface, highlightthickness=0, bd=0)
         emark.pack()
         # 图标：圆角底 + 三条「列表」横条（不依赖字体符号）
-        draw_round_rect(emark, 2, 2, 54, 54, 17,
+        draw_round_rect(emark, px(2), px(2), icon - px(2), icon - px(2), px(17),
                         fill=Theme.accent_soft, outline='')
-        for i, w in enumerate((22, 16, 22)):
-            y = 22 + i * 7
-            draw_round_rect(emark, 17, y, 17 + w, y + 3, 1.5,
+        for i, bar_w in enumerate((22, 16, 22)):
+            y = px(22) + i * px(7)
+            draw_round_rect(emark, px(17), y, px(17) + px(bar_w), y + px(3), px(1.5),
                             fill=Theme.accent, outline='')
         tk.Label(self._empty_state, text='还没有扫描任何文件',
                  font=(Fonts.family, 11, 'bold'), fg=Theme.text_secondary,
-                 bg=Theme.surface).pack(pady=(12, 3))
+                 bg=Theme.surface).pack(pady=(px(12), px(3)))
         tk.Label(self._empty_state,
                  text='点击「选择文件夹」，或直接把文件夹拖到这里',
                  font=Fonts.small, fg=Theme.text_muted,
                  bg=Theme.surface).pack()
         ttk.Button(self._empty_state, text='选择文件夹',
                    command=self._browse_folder,
-                   style='Primary.TButton').pack(pady=(14, 0))
+                   style='Primary.TButton').pack(pady=(px(14), 0))
 
         # 双击编辑季号/集号
         self.tree.bind('<Double-1>', self._on_double_click)
@@ -1403,7 +1503,7 @@ class AniPrepApp:
         self.footer_frame = tk.Frame(self.root, bg=Theme.surface)
         self.footer_frame.pack(fill=tk.X)
 
-        inner = tk.Frame(self.footer_frame, bg=Theme.surface, padx=16, pady=10)
+        inner = tk.Frame(self.footer_frame, bg=Theme.surface, padx=px(16), pady=px(10))
         inner.pack(fill=tk.X)
 
         # 左侧：统计胶囊
@@ -1411,11 +1511,11 @@ class AniPrepApp:
         left.pack(side=tk.LEFT)
 
         self.chip_total = self._make_chip(left, '视频 0')
-        self.chip_total.pack(side=tk.LEFT, padx=(0, 6))
+        self.chip_total.pack(side=tk.LEFT, padx=(0, px(6)))
         self.chip_subs = self._make_chip(left, '字幕 0')
-        self.chip_subs.pack(side=tk.LEFT, padx=(0, 6))
+        self.chip_subs.pack(side=tk.LEFT, padx=(0, px(6)))
         self.chip_warn = self._make_chip(left, '警告 0')
-        self.chip_warn.pack(side=tk.LEFT, padx=(0, 6))
+        self.chip_warn.pack(side=tk.LEFT, padx=(0, px(6)))
         self.chip_conflict = self._make_chip(left, '冲突 0')
         self.chip_conflict.pack(side=tk.LEFT)
 
@@ -1435,7 +1535,7 @@ class AniPrepApp:
             fg=Theme.text_secondary,
             bg=Theme.surface,
         )
-        self.status_label.pack(side=tk.RIGHT, padx=(0, 14))
+        self.status_label.pack(side=tk.RIGHT, padx=(0, px(14)))
 
     def _make_chip(self, parent, text):
         """创建一个圆角统计胶囊"""
@@ -1618,13 +1718,13 @@ class AniPrepApp:
         card = tk.Frame(self.table_frame, bg=Theme.surface,
                         highlightbackground=Theme.border, highlightthickness=1)
         tk.Label(card, text=msg, font=(Fonts.family, 11),
-                 fg=Theme.text, bg=Theme.surface).pack(padx=36, pady=(22, 0))
+                 fg=Theme.text, bg=Theme.surface).pack(padx=px(36), pady=(px(22), 0))
         tk.Label(card, text='解析文件名中的季集号与字幕，请稍候',
                  font=Fonts.small, fg=Theme.text_muted,
-                 bg=Theme.surface).pack(padx=36, pady=(4, 0))
-        pb = ttk.Progressbar(card, mode='indeterminate', length=236,
+                 bg=Theme.surface).pack(padx=px(36), pady=(px(4), 0))
+        pb = ttk.Progressbar(card, mode='indeterminate', length=px(236),
                              style='Line.Horizontal.TProgressbar')
-        pb.pack(padx=36, pady=(14, 22))
+        pb.pack(padx=px(36), pady=(px(14), px(22)))
         card.place(relx=0.5, rely=0.45, anchor='center')
         try:
             pb.start(14)
@@ -2021,7 +2121,7 @@ class AniPrepApp:
             fieldbackground=c.input_bg, foreground=c.input_text,
             insertcolor=c.text, bordercolor=c.border_strong,
             lightcolor=c.border_strong, darkcolor=c.border_strong,
-            padding=(8, 6), relief='flat')
+            padding=(px(8), px(6)), relief='flat')
         mp('TEntry',
            bordercolor=[('focus', c.accent)],
            lightcolor=[('focus', c.accent)],
@@ -2034,7 +2134,7 @@ class AniPrepApp:
             fieldbackground=c.input_bg, foreground=c.input_text,
             background=c.surface, arrowcolor=c.text_secondary, arrowsize=13,
             bordercolor=c.border_strong, lightcolor=c.border_strong,
-            darkcolor=c.border_strong, padding=(8, 4))
+            darkcolor=c.border_strong, padding=(px(8), px(4)))
         mp('TCombobox',
            fieldbackground=[('readonly', c.input_bg)],
            foreground=[('readonly', c.input_text)],
@@ -2053,7 +2153,7 @@ class AniPrepApp:
         cfg('Primary.TButton',
             background=c.accent, foreground=c.accent_text,
             borderwidth=0, focusthickness=0, focuscolor=c.accent,
-            padding=(18, 7), relief='flat', font=Fonts.bold,
+            padding=(px(18), px(7)), relief='flat', font=Fonts.bold,
             bordercolor=c.accent, lightcolor=c.accent, darkcolor=c.accent)
         mp('Primary.TButton',
            background=[('disabled', '#C7D2E8'), ('pressed', c.accent_hover),
@@ -2064,7 +2164,7 @@ class AniPrepApp:
         cfg('Accent.TButton',
             background=c.accent, foreground=c.accent_text,
             borderwidth=0, focusthickness=0, focuscolor=c.accent,
-            padding=(26, 9), relief='flat', font=Fonts.btn_primary,
+            padding=(px(26), px(9)), relief='flat', font=Fonts.btn_primary,
             bordercolor=c.accent, lightcolor=c.accent, darkcolor=c.accent)
         mp('Accent.TButton',
            background=[('disabled', '#C7D2E8'), ('pressed', c.accent_hover),
@@ -2075,7 +2175,7 @@ class AniPrepApp:
         cfg('Ghost.TButton',
             background=c.surface, foreground='#334155',
             borderwidth=1, relief='solid', focusthickness=0, focuscolor=c.surface,
-            padding=(14, 6), font=Fonts.btn,
+            padding=(px(14), px(6)), font=Fonts.btn,
             bordercolor='#D3DCE7', lightcolor='#D3DCE7', darkcolor='#D3DCE7')
         mp('Ghost.TButton',
            background=[('pressed', c.accent_soft), ('active', '#F4F7FF'),
@@ -2089,7 +2189,7 @@ class AniPrepApp:
         # 兼容旧样式名
         cfg('Secondary.TButton',
             background=c.surface, foreground='#334155',
-            borderwidth=1, relief='solid', focusthickness=0, padding=(14, 6),
+            borderwidth=1, relief='solid', focusthickness=0, padding=(px(14), px(6)),
             font=Fonts.btn, bordercolor='#D3DCE7',
             lightcolor='#D3DCE7', darkcolor='#D3DCE7')
         mp('Secondary.TButton',
@@ -2105,17 +2205,17 @@ class AniPrepApp:
         cfg('TProgressbar',
             background=c.accent, troughcolor=c.surface_sunken,
             bordercolor=c.surface_sunken, lightcolor=c.accent,
-            darkcolor=c.accent, thickness=5)
+            darkcolor=c.accent, thickness=px(5))
         cfg('Line.Horizontal.TProgressbar',
             background=c.accent, troughcolor=c.surface_sunken,
             bordercolor=c.surface_sunken, lightcolor=c.accent,
-            darkcolor=c.accent, thickness=5)
+            darkcolor=c.accent, thickness=px(5))
 
         # --- 表格 ---
         cfg('Card.Treeview',
             background=c.surface, fieldbackground=c.surface,
             foreground=c.text, bordercolor=c.border,
-            borderwidth=1, relief='flat', rowheight=30,
+            borderwidth=1, relief='flat', rowheight=px(30),
             font=Fonts.table)
         mp('Card.Treeview',
            background=[('selected', c.table_selected)],
@@ -2124,7 +2224,7 @@ class AniPrepApp:
         cfg('Card.Treeview.Heading',
             background=c.surface_alt, foreground=c.text_secondary,
             font=Fonts.table_head, borderwidth=0, relief='flat',
-            padding=(10, 9), bordercolor=c.border)
+            padding=(px(10), px(9)), bordercolor=c.border)
         mp('Card.Treeview.Heading',
            background=[('active', c.table_hover)],
            foreground=[('active', c.text)])
@@ -2261,26 +2361,26 @@ class AniPrepApp:
         # 搜索弹窗
         dlg = tk.Toplevel(self.root)
         dlg.title("TMDB 匹配剧集")
-        dlg.geometry("620x560")
+        dlg.geometry(f"{px(620)}x{px(560)}")
         dlg.configure(bg=Theme.bg)
         dlg.transient(self.root)
         dlg.grab_set()
 
         # 搜索卡片
-        top = tk.Frame(dlg, bg=Theme.bg, padx=16, pady=14)
+        top = tk.Frame(dlg, bg=Theme.bg, padx=px(16), pady=px(14))
         top.pack(fill=tk.X)
 
         card = tk.Frame(top, bg=Theme.surface,
                         highlightbackground=Theme.border, highlightthickness=1)
         card.pack(fill=tk.X)
-        cpad = tk.Frame(card, bg=Theme.surface, padx=14, pady=12)
+        cpad = tk.Frame(card, bg=Theme.surface, padx=px(14), pady=px(12))
         cpad.pack(fill=tk.X)
 
         tk.Label(cpad, text='搜索剧名', font=Fonts.small,
                  bg=Theme.surface, fg=Theme.text_secondary).pack(anchor='w')
 
         search_row = tk.Frame(cpad, bg=Theme.surface)
-        search_row.pack(fill=tk.X, pady=(6, 0))
+        search_row.pack(fill=tk.X, pady=(px(6), 0))
 
         # 智能提取标题
         folder_name = os.path.basename(os.path.normpath(self.folder_path.get())) or ''
@@ -2296,12 +2396,12 @@ class AniPrepApp:
         if clean_title != folder_name:
             tk.Label(cpad, text=f'来自文件夹：{folder_name}',
                      font=Fonts.small, fg=Theme.text_muted, bg=Theme.surface,
-                     wraplength=540, justify='left').pack(anchor='w', pady=(8, 0))
+                     wraplength=px(540), justify='left').pack(anchor='w', pady=(px(8), 0))
 
         # 结果列表
         list_frame = tk.Frame(dlg, bg=Theme.surface,
                               highlightbackground=Theme.border, highlightthickness=1)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=16)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=px(16))
 
         columns = ('name', 'year', 'lang')
         tree = ttk.Treeview(list_frame, columns=columns, show='headings',
@@ -2309,18 +2409,18 @@ class AniPrepApp:
         tree.heading('name', text='剧名', anchor='w')
         tree.heading('year', text='首播年份', anchor='center')
         tree.heading('lang', text='语言', anchor='center')
-        tree.column('name', width=380, minwidth=180, stretch=True)
-        tree.column('year', width=90, anchor='center', stretch=False)
-        tree.column('lang', width=70, anchor='center', stretch=False)
+        tree.column('name', width=px(380), minwidth=px(180), stretch=True)
+        tree.column('year', width=px(90), anchor='center', stretch=False)
+        tree.column('lang', width=px(70), anchor='center', stretch=False)
 
         vsb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview,
                             style='Card.Vertical.TScrollbar')
         tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=6)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, px(5)), pady=px(6))
         tree.pack(fill=tk.BOTH, expand=True)
 
         # 底部操作区
-        btn_frame = tk.Frame(dlg, bg=Theme.bg, padx=16, pady=12)
+        btn_frame = tk.Frame(dlg, bg=Theme.bg, padx=px(16), pady=px(12))
         btn_frame.pack(fill=tk.X)
 
         result_label = tk.Label(btn_frame, text='', bg=Theme.bg, fg=Theme.text_secondary,
@@ -2394,12 +2494,12 @@ class AniPrepApp:
 
         query_entry.bind('<Return>', lambda e: do_search())
         ttk.Button(search_row, text='搜索', command=do_search,
-                   style='Primary.TButton').pack(side=tk.LEFT, padx=(8, 0))
+                   style='Primary.TButton').pack(side=tk.LEFT, padx=(px(8), 0))
 
         ttk.Button(btn_frame, text='确认选择', command=on_select,
                    style='Accent.TButton').pack(side=tk.RIGHT)
         ttk.Button(btn_frame, text='取消', command=dlg.destroy,
-                   style='Ghost.TButton').pack(side=tk.RIGHT, padx=(0, 8))
+                   style='Ghost.TButton').pack(side=tk.RIGHT, padx=(0, px(8)))
 
         # 自动搜索
         if folder_name:
@@ -2530,10 +2630,12 @@ class AniPrepApp:
         text = (
             "使用说明\n"
             "════════\n\n"
-            "1. 点击「浏览」选择动漫根文件夹（如 海贼王/）\n"
+            "1. 选择动漫根文件夹（如 海贼王/）：\n"
+            "   - 点击「浏览」，或\n"
+            "   - 直接把文件夹从资源管理器拖进窗口\n"
             "2. 点击「扫描」自动识别分季子文件夹和集号\n"
             "3. 在表格中审核结果：\n"
-            "   - 单击 ☑ 列勾选/取消文件\n"
+            "   - 单击「选」列勾选/取消文件\n"
             "   - 双击「季」或「集」列编辑序号\n"
             "   - 琥珀色行表示集号可疑，需要确认\n"
             "4. 点击「执行重命名」批量重命名\n\n"
@@ -2544,14 +2646,16 @@ class AniPrepApp:
 
     def _show_about(self):
         text = (
-            "AniPrep 动漫媒体文件规范化重命名工具\n"
-            "版本 1.5\n\n"
+            "AniPrep 动漫媒体库规范化重命名工具\n"
+            "版本 1.6\n\n"
             "将动漫视频及外挂字幕重命名为\n"
             "Emby/Jellyfin 友好格式\n\n"
             "• 支持 TMDB 自动匹配季集信息\n"
             "• 支持 S0 (特典/Specials) 季号\n"
             "• 跨季集号自动偏移\n"
-            "• 文件夹同步重命名"
+            "• 文件夹同步重命名\n"
+            "• 支持把文件夹直接拖进窗口\n"
+            "• 高 DPI 屏幕清晰渲染"
         )
         messagebox.showinfo("关于", text)
 
@@ -2561,6 +2665,8 @@ class AniPrepApp:
 # ============================================================================
 
 def main():
+    # 必须在创建 Tk 之前开启 DPI 感知，否则窗口会被系统放大拉伸（文字发虚）
+    enable_dpi_awareness()
     root = tk.Tk()
     app = AniPrepApp(root)
     root.mainloop()
